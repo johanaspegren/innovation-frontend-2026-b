@@ -2,6 +2,7 @@ package com.aei.innovision
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.result.contract.ActivityResultContracts
@@ -22,6 +23,8 @@ import java.util.concurrent.Executors
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var cameraExecutor: ExecutorService
+    private lateinit var yuvToRgbConverter: YuvToRgbConverter
+    private lateinit var postItDetector: PostItDetector
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
@@ -41,6 +44,8 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         cameraExecutor = Executors.newSingleThreadExecutor()
+        yuvToRgbConverter = YuvToRgbConverter(this)
+        postItDetector = PostItDetector()
 
         if (hasCameraPermission()) {
             startCamera()
@@ -74,11 +79,14 @@ class MainActivity : AppCompatActivity() {
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                     .also {
-                        it.setAnalyzer(cameraExecutor, PostItAnalyzer { text ->
+                        it.setAnalyzer(cameraExecutor, PostItAnalyzer { text, detections, width, height ->
                             runOnUiThread {
-                                binding.statusText.text = text.ifBlank {
+                                binding.statusText.text = if (text.isBlank()) {
                                     getString(R.string.no_text_detected)
+                                } else {
+                                    text
                                 }
+                                binding.overlayView.setDetections(detections, width, height)
                             }
                         })
                     }
@@ -97,7 +105,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private inner class PostItAnalyzer(
-        private val onTextDetected: (String) -> Unit,
+        private val onResult: (String, List<PostItDetector.Detection>, Int, Int) -> Unit,
     ) : ImageAnalysis.Analyzer {
         override fun analyze(imageProxy: ImageProxy) {
             val mediaImage = imageProxy.image
@@ -106,6 +114,10 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
+            val bitmap = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
+            yuvToRgbConverter.yuvToRgb(mediaImage, bitmap)
+            val detections = postItDetector.detect(bitmap)
+
             val image = InputImage.fromMediaImage(
                 mediaImage,
                 imageProxy.imageInfo.rotationDegrees,
@@ -113,10 +125,11 @@ class MainActivity : AppCompatActivity() {
 
             recognizer.process(image)
                 .addOnSuccessListener { visionText ->
-                    onTextDetected(visionText.text)
+                    onResult(visionText.text, detections, bitmap.width, bitmap.height)
                 }
                 .addOnFailureListener { error ->
                     Log.e("MainActivity", "Text recognition failed", error)
+                    onResult("", detections, bitmap.width, bitmap.height)
                 }
                 .addOnCompleteListener {
                     imageProxy.close()
