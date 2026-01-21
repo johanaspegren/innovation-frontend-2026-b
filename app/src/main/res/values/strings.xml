@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">innovision</string>
+    <string name="camera_permission_required">Camera permission is required to scan post-its.</string>
+    <string name="no_text_detected">No text detected yet.</string>
+</resources>
