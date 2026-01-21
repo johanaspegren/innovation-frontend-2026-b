@@ -28,4 +28,5 @@ gradle wrapper
 
 ## Next steps
 - Replace the heuristic detector with a trained model and crop detected regions before OCR.
+- Add a post-it detector (TFLite model) and crop detected regions before OCR.
 - Build export pipeline to Neo4j (JSON -> API -> Neo4j).
