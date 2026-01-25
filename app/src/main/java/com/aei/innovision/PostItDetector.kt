@@ -65,7 +65,7 @@ class PostItDetector(context: Context) {
         val imageProcessor = ImageProcessor.Builder()
             .add(Rot90Op(-rotationDegrees / 90))
             .add(ResizeOp(modelHeight, modelWidth, ResizeOp.ResizeMethod.BILINEAR))
-            .add(NormalizeOp(127.5f, 127.5f))
+            .add(NormalizeOp(0f, 127.5f))
             .build()
 
         var tensorImage = TensorImage(DataType.FLOAT32)
@@ -86,7 +86,7 @@ class PostItDetector(context: Context) {
 
         for (i in 0 until 8400) {
             val score = outputBuffer[0][4][i]
-            if (score > 0.25f) {  // Slightly higher threshold for more stable detections
+            if (score > 0.1f) {  // Slightly higher threshold for more stable detections
                 var xCenter = outputBuffer[0][0][i]
                 var yCenter = outputBuffer[0][1][i]
                 var w = outputBuffer[0][2][i]
