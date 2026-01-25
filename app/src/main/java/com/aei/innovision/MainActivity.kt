@@ -3,6 +3,7 @@ package com.aei.innovision
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,11 +17,14 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import com.aei.innovision.databinding.ActivityMainBinding
+import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.math.max
+import kotlin.math.min
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
@@ -107,6 +111,32 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun rotateBitmap(bitmap: Bitmap, degrees: Int): Bitmap {
+        if (degrees == 0) return bitmap
+        val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }
+
+    private fun cropDetectionRegion(bitmap: Bitmap, rect: android.graphics.RectF): Bitmap? {
+        // Clamp coordinates to bitmap bounds
+        val left = max(0, rect.left.toInt())
+        val top = max(0, rect.top.toInt())
+        val right = min(bitmap.width, rect.right.toInt())
+        val bottom = min(bitmap.height, rect.bottom.toInt())
+
+        val width = right - left
+        val height = bottom - top
+
+        if (width <= 0 || height <= 0) return null
+
+        return try {
+            Bitmap.createBitmap(bitmap, left, top, width, height)
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to crop bitmap", e)
+            null
+        }
+    }
+
     private inner class PostItAnalyzer(
         private val onResult: (String, List<PostItDetector.Detection>, Int, Int) -> Unit,
     ) : ImageAnalysis.Analyzer {
@@ -130,20 +160,42 @@ class MainActivity : AppCompatActivity() {
             val displayWidth = if (isRotated90or270) bitmap.height else bitmap.width
             val displayHeight = if (isRotated90or270) bitmap.width else bitmap.height
 
-            val image = InputImage.fromMediaImage(
-                mediaImage,
-                rotationDegrees,
-            )
+            // Rotate bitmap to match detection coordinates (upright orientation)
+            val rotatedBitmap = rotateBitmap(bitmap, rotationDegrees)
 
-            recognizer.process(image)
-                .addOnSuccessListener { visionText ->
-                    onResult(visionText.text, detections, displayWidth, displayHeight)
+            if (detections.isEmpty()) {
+                // No detections - just report empty
+                onResult("", detections, displayWidth, displayHeight)
+                imageProxy.close()
+                return
+            }
+
+            // Run OCR on each detected post-it region
+            val ocrTasks = detections.map { detection ->
+                val croppedBitmap = cropDetectionRegion(rotatedBitmap, detection.rect)
+                if (croppedBitmap != null) {
+                    val inputImage = InputImage.fromBitmap(croppedBitmap, 0)
+                    recognizer.process(inputImage)
+                        .continueWith { task ->
+                            if (task.isSuccessful) {
+                                detection.ocrText = task.result?.text?.replace("\n", " ") ?: ""
+                            }
+                            detection
+                        }
+                } else {
+                    Tasks.forResult(detection)
                 }
-                .addOnFailureListener { error ->
-                    Log.e("MainActivity", "Text recognition failed", error)
-                    onResult("", detections, displayWidth, displayHeight)
-                }
+            }
+
+            // Wait for all OCR tasks to complete
+            Tasks.whenAllComplete(ocrTasks)
                 .addOnCompleteListener {
+                    // Combine all OCR text for the status display
+                    val combinedText = detections
+                        .filter { it.ocrText.isNotBlank() }
+                        .joinToString("\n") { it.ocrText }
+
+                    onResult(combinedText, detections, displayWidth, displayHeight)
                     imageProxy.close()
                 }
         }
