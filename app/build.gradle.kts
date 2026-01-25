@@ -61,4 +61,8 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite-gpu:$tfliteVersion")
     implementation("org.tensorflow:tensorflow-lite-gpu-api:$tfliteVersion")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
+    // Network
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.google.code.gson:gson:2.10.1")
 }

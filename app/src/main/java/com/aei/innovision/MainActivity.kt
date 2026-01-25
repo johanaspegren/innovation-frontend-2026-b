@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
@@ -33,6 +34,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var postItDetector: PostItDetector
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private val apiService = PostItApiService()
+
+    // Current state for upload
+    @Volatile private var currentDetections: List<PostItDetector.Detection> = emptyList()
+    @Volatile private var currentBitmap: Bitmap? = null
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -53,10 +59,49 @@ class MainActivity : AppCompatActivity() {
         yuvToRgbConverter = YuvToRgbConverter(this)
         postItDetector = PostItDetector(this)
 
+        binding.uploadButton.setOnClickListener {
+            uploadCurrentPostIts()
+        }
+
         if (hasCameraPermission()) {
             startCamera()
         } else {
             requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun uploadCurrentPostIts() {
+        val detections = currentDetections
+        val bitmap = currentBitmap
+
+        if (detections.isEmpty()) {
+            Toast.makeText(this, "No post-its detected to upload", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        binding.uploadButton.isEnabled = false
+        Toast.makeText(this, "Uploading ${detections.size} post-its...", Toast.LENGTH_SHORT).show()
+
+        apiService.uploadPostIts(detections, bitmap) { result ->
+            runOnUiThread {
+                binding.uploadButton.isEnabled = true
+                result.fold(
+                    onSuccess = { response ->
+                        Toast.makeText(
+                            this,
+                            "Uploaded ${detections.size} post-its successfully!",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    onFailure = { error ->
+                        Toast.makeText(
+                            this,
+                            "Upload failed: ${error.message}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                )
+            }
         }
     }
 
@@ -194,6 +239,10 @@ class MainActivity : AppCompatActivity() {
                     val combinedText = detections
                         .filter { it.ocrText.isNotBlank() }
                         .joinToString("\n") { it.ocrText }
+
+                    // Store current state for upload
+                    currentDetections = detections.toList()
+                    currentBitmap = rotatedBitmap.copy(rotatedBitmap.config, false)
 
                     onResult(combinedText, detections, displayWidth, displayHeight)
                     imageProxy.close()
