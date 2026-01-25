@@ -171,16 +171,36 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Run OCR on each detected post-it region
+            // Try both normal and 180° rotated to handle text that might be upside down
             val ocrTasks = detections.map { detection ->
                 val croppedBitmap = cropDetectionRegion(rotatedBitmap, detection.rect)
                 if (croppedBitmap != null) {
+                    // Try OCR on normal orientation
                     val inputImage = InputImage.fromBitmap(croppedBitmap, 0)
                     recognizer.process(inputImage)
-                        .continueWith { task ->
-                            if (task.isSuccessful) {
-                                detection.ocrText = task.result?.text?.replace("\n", " ") ?: ""
+                        .continueWithTask { task ->
+                            val normalText = task.result?.text?.replace("\n", " ") ?: ""
+
+                            // If we got good text, use it; otherwise try 180° rotation
+                            if (normalText.length >= 2) {
+                                detection.ocrText = normalText
+                                Tasks.forResult(detection)
+                            } else {
+                                // Try with 180° rotation for upside-down text
+                                val rotated180 = rotateBitmap(croppedBitmap, 180)
+                                val rotatedImage = InputImage.fromBitmap(rotated180, 0)
+                                recognizer.process(rotatedImage)
+                                    .continueWith { rotatedTask ->
+                                        val rotatedText = rotatedTask.result?.text?.replace("\n", " ") ?: ""
+                                        // Use whichever gave more text
+                                        detection.ocrText = if (rotatedText.length > normalText.length) {
+                                            rotatedText
+                                        } else {
+                                            normalText
+                                        }
+                                        detection
+                                    }
                             }
-                            detection
                         }
                 } else {
                     Tasks.forResult(detection)
