@@ -54,4 +54,11 @@ dependencies {
 
     implementation("com.google.mlkit:text-recognition:16.0.0")
     implementation("com.google.mlkit:digital-ink-recognition:18.1.0")
+
+    // Use consistent TFLite versions
+    val tfliteVersion = "2.14.0"
+    implementation("org.tensorflow:tensorflow-lite:$tfliteVersion")
+    implementation("org.tensorflow:tensorflow-lite-gpu:$tfliteVersion")
+    implementation("org.tensorflow:tensorflow-lite-gpu-api:$tfliteVersion")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 }

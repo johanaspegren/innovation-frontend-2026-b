@@ -6,8 +6,10 @@ import android.graphics.Bitmap
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -45,7 +47,7 @@ class MainActivity : AppCompatActivity() {
 
         cameraExecutor = Executors.newSingleThreadExecutor()
         yuvToRgbConverter = YuvToRgbConverter(this)
-        postItDetector = PostItDetector()
+        postItDetector = PostItDetector(this)
 
         if (hasCameraPermission()) {
             startCamera()
@@ -57,6 +59,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()
+        postItDetector.close()
     }
 
     private fun hasCameraPermission(): Boolean {
@@ -107,20 +110,23 @@ class MainActivity : AppCompatActivity() {
     private inner class PostItAnalyzer(
         private val onResult: (String, List<PostItDetector.Detection>, Int, Int) -> Unit,
     ) : ImageAnalysis.Analyzer {
-        override fun analyze(imageProxy: ImageProxy) {
+        @OptIn(ExperimentalGetImage::class) override fun analyze(imageProxy: ImageProxy) {
             val mediaImage = imageProxy.image
             if (mediaImage == null) {
                 imageProxy.close()
                 return
             }
 
+            val rotationDegrees = imageProxy.imageInfo.rotationDegrees
             val bitmap = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
             yuvToRgbConverter.yuvToRgb(mediaImage, bitmap)
-            val detections = postItDetector.detect(bitmap)
+            
+            // Pass the rotation degrees to the detector
+            val detections = postItDetector.detect(bitmap, rotationDegrees)
 
             val image = InputImage.fromMediaImage(
                 mediaImage,
-                imageProxy.imageInfo.rotationDegrees,
+                rotationDegrees,
             )
 
             recognizer.process(image)
