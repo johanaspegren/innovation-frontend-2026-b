@@ -23,9 +23,15 @@ class PostItDetector(context: Context) {
     private val gpuDelegate: GpuDelegate?
     private val labels: List<String>
     private val inputShape: IntArray
-    
+
     // YOLOv8 output shape is [1, 5, 8400]
     private var outputBuffer = Array(1) { Array(5) { FloatArray(8400) } }
+
+    // Temporal smoothing: track detections across frames
+    private var previousDetections: List<Detection> = emptyList()
+    private var framesSinceDetection: Int = 0
+    private val maxFramesToKeep = 5  // Keep previous detections for up to 5 frames
+    private val iouMatchThreshold = 0.3f  // IoU threshold to consider same object
 
     init {
         val model: MappedByteBuffer = FileUtil.loadMappedFile(context, "best_float16.tflite")
@@ -55,11 +61,11 @@ class PostItDetector(context: Context) {
         val modelHeight = inputShape[1]
         val modelWidth = inputShape[2]
 
-        // 1. Prepare image
+        // 1. Prepare image - rotate to upright orientation for model
         val imageProcessor = ImageProcessor.Builder()
             .add(Rot90Op(-rotationDegrees / 90))
             .add(ResizeOp(modelHeight, modelWidth, ResizeOp.ResizeMethod.BILINEAR))
-            .add(NormalizeOp(127.5f, 127.5f)) 
+            .add(NormalizeOp(127.5f, 127.5f))
             .build()
 
         var tensorImage = TensorImage(DataType.FLOAT32)
@@ -70,17 +76,17 @@ class PostItDetector(context: Context) {
         interpreter.run(tensorImage.buffer, outputBuffer)
 
         val detections = mutableListOf<Detection>()
-        val isRotated = rotationDegrees == 90 || rotationDegrees == 270
-        val uprightWidth = if (isRotated) bitmap.height else bitmap.width
-        val uprightHeight = if (isRotated) bitmap.height else bitmap.width // WAIT: this should be bitmap.width if rotated? No, let's fix the logic below.
 
-        // Correct dimensions of the UPRIGHT image the model sees
-        val modelSpaceWidth = if (isRotated) bitmap.height else bitmap.width
-        val modelSpaceHeight = if (isRotated) bitmap.width else bitmap.height
+        // The model sees the rotated image. After rotation:
+        // - 90° or 270°: width and height are swapped
+        // - 0° or 180°: dimensions stay the same
+        val isRotated90or270 = rotationDegrees == 90 || rotationDegrees == 270
+        val rotatedWidth = if (isRotated90or270) bitmap.height else bitmap.width
+        val rotatedHeight = if (isRotated90or270) bitmap.width else bitmap.height
 
         for (i in 0 until 8400) {
             val score = outputBuffer[0][4][i]
-            if (score > 0.15f) { 
+            if (score > 0.25f) {  // Slightly higher threshold for more stable detections
                 var xCenter = outputBuffer[0][0][i]
                 var yCenter = outputBuffer[0][1][i]
                 var w = outputBuffer[0][2][i]
@@ -94,27 +100,104 @@ class PostItDetector(context: Context) {
                     h *= modelHeight
                 }
 
-                // Scale from model space (640x640) to original LANDSCAPE bitmap space
-                // Camera frames are usually landscape. We need to map model boxes back to that landscape frame.
-                val scaleX = bitmap.width.toFloat() / modelWidth
-                val scaleY = bitmap.height.toFloat() / modelHeight
+                // Scale from model space (640x640) to rotated image space
+                val scaleX = rotatedWidth.toFloat() / modelWidth
+                val scaleY = rotatedHeight.toFloat() / modelHeight
 
-                // Important: If we rotated the image by 90 deg, X in model space maps to Y in bitmap space!
-                // Let's simplify: map to the coordinates of the bitmap *after* rotation, then rotate the rect back.
-                
-                // For now, let's just log everything to debug the "off-centered" issue
-                val left = (xCenter - w / 2f) * scaleX
-                val top = (yCenter - h / 2f) * scaleY
-                val right = (xCenter + w / 2f) * scaleX
-                val bottom = (yCenter + h / 2f) * scaleY
+                // Calculate box in rotated space
+                val rotLeft = (xCenter - w / 2f) * scaleX
+                val rotTop = (yCenter - h / 2f) * scaleY
+                val rotRight = (xCenter + w / 2f) * scaleX
+                val rotBottom = (yCenter + h / 2f) * scaleY
 
-                Log.d("PostItDetector", "MATCH! Score: $score, xCenter: $xCenter, yCenter: $yCenter, w: $w, h: $h")
-                
+                // Transform coordinates back to original bitmap space based on rotation
+                val (left, top, right, bottom) = when (rotationDegrees) {
+                    90 -> {
+                        // Rotated 90° CW: (x, y) in rotated -> (y, width - x) in original
+                        arrayOf(
+                            rotTop,
+                            rotatedWidth - rotRight,
+                            rotBottom,
+                            rotatedWidth - rotLeft
+                        )
+                    }
+                    180 -> {
+                        // Rotated 180°: (x, y) -> (width - x, height - y)
+                        arrayOf(
+                            rotatedWidth - rotRight,
+                            rotatedHeight - rotBottom,
+                            rotatedWidth - rotLeft,
+                            rotatedHeight - rotTop
+                        )
+                    }
+                    270 -> {
+                        // Rotated 270° CW (90° CCW): (x, y) -> (height - y, x)
+                        arrayOf(
+                            rotatedHeight - rotBottom,
+                            rotLeft,
+                            rotatedHeight - rotTop,
+                            rotRight
+                        )
+                    }
+                    else -> {
+                        // No rotation
+                        arrayOf(rotLeft, rotTop, rotRight, rotBottom)
+                    }
+                }
+
+                Log.d("PostItDetector", "Detection: score=$score, rect=($left, $top, $right, $bottom)")
                 detections.add(Detection(RectF(left, top, right, bottom), labels[0], score))
             }
         }
 
-        return applyNMS(detections)
+        val nmsDetections = applyNMS(detections)
+
+        // Apply temporal smoothing
+        return applyTemporalSmoothing(nmsDetections)
+    }
+
+    private fun applyTemporalSmoothing(currentDetections: List<Detection>): List<Detection> {
+        if (currentDetections.isEmpty()) {
+            // No detections this frame - keep previous detections for a few frames
+            framesSinceDetection++
+            return if (framesSinceDetection <= maxFramesToKeep) {
+                // Return previous detections with decayed scores
+                previousDetections.map { det ->
+                    val decayFactor = 1f - (framesSinceDetection.toFloat() / (maxFramesToKeep + 1))
+                    Detection(det.rect, det.label, det.score * decayFactor)
+                }
+            } else {
+                previousDetections = emptyList()
+                emptyList()
+            }
+        }
+
+        // We have detections - reset counter and smooth positions
+        framesSinceDetection = 0
+
+        val smoothedDetections = currentDetections.map { current ->
+            // Find matching previous detection
+            val matchingPrev = previousDetections.find { prev ->
+                calculateIoU(current.rect, prev.rect) > iouMatchThreshold
+            }
+
+            if (matchingPrev != null) {
+                // Smooth the position with exponential moving average
+                val alpha = 0.6f  // Weight for current detection (higher = less smoothing)
+                val smoothedRect = RectF(
+                    alpha * current.rect.left + (1 - alpha) * matchingPrev.rect.left,
+                    alpha * current.rect.top + (1 - alpha) * matchingPrev.rect.top,
+                    alpha * current.rect.right + (1 - alpha) * matchingPrev.rect.right,
+                    alpha * current.rect.bottom + (1 - alpha) * matchingPrev.rect.bottom
+                )
+                Detection(smoothedRect, current.label, current.score)
+            } else {
+                current
+            }
+        }
+
+        previousDetections = smoothedDetections
+        return smoothedDetections
     }
 
     private fun applyNMS(detections: List<Detection>): List<Detection> {
