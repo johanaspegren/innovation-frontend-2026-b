@@ -7,20 +7,29 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.View
+import kotlin.math.roundToInt
 
 class OverlayView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
 ) : View(context, attrs) {
-    private val paint = Paint().apply {
+
+    private val boxPaint = Paint().apply {
         style = Paint.Style.STROKE
         strokeWidth = 6f
         color = Color.YELLOW
+        isAntiAlias = true
     }
 
     private val textPaint = Paint().apply {
         color = Color.WHITE
-        textSize = 36f
+        textSize = 32f
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+
+    private val bgPaint = Paint().apply {
+        color = Color.argb(160, 0, 0, 0) // translucent black
         style = Paint.Style.FILL
     }
 
@@ -28,7 +37,11 @@ class OverlayView @JvmOverloads constructor(
     private var imageWidth: Int = 0
     private var imageHeight: Int = 0
 
-    fun setDetections(detections: List<PostItDetector.Detection>, imageWidth: Int, imageHeight: Int) {
+    fun setDetections(
+        detections: List<PostItDetector.Detection>,
+        imageWidth: Int,
+        imageHeight: Int
+    ) {
         this.detections = detections
         this.imageWidth = imageWidth
         this.imageHeight = imageHeight
@@ -42,15 +55,61 @@ class OverlayView @JvmOverloads constructor(
         val scaleX = width / imageWidth.toFloat()
         val scaleY = height / imageHeight.toFloat()
 
-        detections.forEach { detection ->
+        detections.forEach { det ->
+
+            // Scale rect to view coordinates
             val rect = RectF(
-                detection.rect.left * scaleX,
-                detection.rect.top * scaleY,
-                detection.rect.right * scaleX,
-                detection.rect.bottom * scaleY,
+                det.rect.left * scaleX,
+                det.rect.top * scaleY,
+                det.rect.right * scaleX,
+                det.rect.bottom * scaleY
             )
-            canvas.drawRect(rect, paint)
-            canvas.drawText(detection.label, rect.left + 8f, rect.top + 36f, textPaint)
+
+            // Draw bounding box
+            canvas.drawRect(rect, boxPaint)
+
+            // Compute center in IMAGE coordinates (important!)
+            val cx = ((det.rect.left + det.rect.right) / 2f).roundToInt()
+            val cy = ((det.rect.top + det.rect.bottom) / 2f).roundToInt()
+
+            val label = det.label
+            val conf = String.format("%.2f", det.score)
+
+            val line1 = "$label $conf"
+            val line2 = "x=$cx y=$cy"
+
+            val textPadding = 8f
+            val lineHeight = textPaint.textSize + 6f
+
+            val textWidth = maxOf(
+                textPaint.measureText(line1),
+                textPaint.measureText(line2)
+            )
+
+            val bgRect = RectF(
+                rect.left,
+                rect.top - lineHeight * 2 - textPadding * 2,
+                rect.left + textWidth + textPadding * 2,
+                rect.top
+            )
+
+            // Background for readability
+            canvas.drawRect(bgRect, bgPaint)
+
+            // Draw text
+            canvas.drawText(
+                line1,
+                bgRect.left + textPadding,
+                bgRect.top + lineHeight,
+                textPaint
+            )
+
+            canvas.drawText(
+                line2,
+                bgRect.left + textPadding,
+                bgRect.top + lineHeight * 2,
+                textPaint
+            )
         }
     }
 }

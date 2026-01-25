@@ -16,6 +16,15 @@ import org.tensorflow.lite.support.image.ops.Rot90Op
 import java.nio.MappedByteBuffer
 import kotlin.math.max
 
+private data class Letterbox(
+    val scale: Float,
+    val dx: Float,
+    val dy: Float,
+    val resizedW: Int,
+    val resizedH: Int
+)
+
+
 class PostItDetector(context: Context) {
 
     data class Detection(val rect: RectF, val label: String, val score: Float, val trackId: Int? = null)
@@ -96,18 +105,54 @@ class PostItDetector(context: Context) {
         )
     }
 
+    private fun letterbox(bitmap: Bitmap, dstSize: Int): Pair<Bitmap, Letterbox> {
+        val srcW = bitmap.width
+        val srcH = bitmap.height
+
+        val scale = minOf(
+            dstSize.toFloat() / srcW,
+            dstSize.toFloat() / srcH
+        )
+
+        val resizedW = (srcW * scale).toInt()
+        val resizedH = (srcH * scale).toInt()
+
+        val dx = (dstSize - resizedW) / 2f
+        val dy = (dstSize - resizedH) / 2f
+
+        val resized = Bitmap.createScaledBitmap(bitmap, resizedW, resizedH, true)
+        val output = Bitmap.createBitmap(dstSize, dstSize, Bitmap.Config.ARGB_8888)
+
+        val canvas = android.graphics.Canvas(output)
+        canvas.drawColor(android.graphics.Color.BLACK)
+        canvas.drawBitmap(resized, dx, dy, null)
+
+        return output to Letterbox(scale, dx, dy, resizedW, resizedH)
+    }
+
     fun detect(bitmap: Bitmap, rotationDegrees: Int = 0): List<Detection> {
         val modelHeight = inputShape[1]
         val modelWidth = inputShape[2]
 
         // 1) Preprocess (rotate then resize+normalize)
-        var tensorImage = TensorImage(DataType.FLOAT32)
-        tensorImage.load(bitmap)
+        //var tensorImage = TensorImage(DataType.FLOAT32)
+        //tensorImage.load(bitmap)
 
         val rot = ((rotationDegrees % 360) + 360) % 360
         val rotProc = rotProcessors[rot] ?: rotProcessors[0]!!
-        tensorImage = rotProc.process(tensorImage)
-        tensorImage = baseProcessor.process(tensorImage)
+        //tensorImage = rotProc.process(tensorImage)
+        //tensorImage = baseProcessor.process(tensorImage)
+
+        val (lbBitmap, lb) = letterbox(bitmap, modelWidth)
+
+        var tensorImage = TensorImage(DataType.FLOAT32)
+        tensorImage.load(lbBitmap)
+        val imageProcessor = ImageProcessor.Builder()
+            .add(NormalizeOp(0f, 255f))   // scale to 0..1
+            .build()
+
+        tensorImage = imageProcessor.process(tensorImage)
+
 
         // 2) Inference
         interpreter.run(tensorImage.buffer, outputBuffer)
@@ -119,8 +164,8 @@ class PostItDetector(context: Context) {
         val rotatedWidth = if (isRotated90or270) bitmap.height else bitmap.width
         val rotatedHeight = if (isRotated90or270) bitmap.width else bitmap.height
 
-        val scaleX = rotatedWidth.toFloat() / modelWidth
-        val scaleY = rotatedHeight.toFloat() / modelHeight
+        //val scaleX = rotatedWidth.toFloat() / modelWidth
+        //val scaleY = rotatedHeight.toFloat() / modelHeight
 
         for (i in 0 until 8400) {
             val score = outputBuffer[0][4][i]
@@ -140,37 +185,33 @@ class PostItDetector(context: Context) {
             }
 
             // Box in rotated space
-            val rotLeft = (xCenter - w / 2f) * scaleX
-            val rotTop = (yCenter - h / 2f) * scaleY
-            val rotRight = (xCenter + w / 2f) * scaleX
-            val rotBottom = (yCenter + h / 2f) * scaleY
+            val xCenterPx = xCenter
+            val yCenterPx = yCenter
+            val wPx = w
+            val hPx = h
 
-            // Map back to original bitmap space
-            val (left, top, right, bottom) = when (rot) {
-                90 -> arrayOf(
-                    rotTop,
-                    rotatedWidth - rotRight,
-                    rotBottom,
-                    rotatedWidth - rotLeft
-                )
-                180 -> arrayOf(
-                    rotatedWidth - rotRight,
-                    rotatedHeight - rotBottom,
-                    rotatedWidth - rotLeft,
-                    rotatedHeight - rotTop
-                )
-                270 -> arrayOf(
-                    rotatedHeight - rotBottom,
-                    rotLeft,
-                    rotatedHeight - rotTop,
-                    rotRight
-                )
-                else -> arrayOf(rotLeft, rotTop, rotRight, rotBottom)
-            }
+// ---- UN-LETTERBOX ----
+            val x = (xCenterPx - lb.dx) / lb.scale
+            val y = (yCenterPx - lb.dy) / lb.scale
+            val boxW = wPx / lb.scale
+            val boxH = hPx / lb.scale
+
+            val left = x - boxW / 2f
+            val top = y - boxH / 2f
+            val right = x + boxW / 2f
+            val bottom = y + boxH / 2f
+
+// Clamp to bitmap bounds (important for stability)
+            val clamped = RectF(
+                left.coerceIn(0f, bitmap.width.toFloat()),
+                top.coerceIn(0f, bitmap.height.toFloat()),
+                right.coerceIn(0f, bitmap.width.toFloat()),
+                bottom.coerceIn(0f, bitmap.height.toFloat())
+            )
 
             detections.add(
                 Detection(
-                    rect = RectF(left, top, right, bottom),
+                    rect = clamped,
                     label = labels.firstOrNull() ?: "postit",
                     score = score
                 )
