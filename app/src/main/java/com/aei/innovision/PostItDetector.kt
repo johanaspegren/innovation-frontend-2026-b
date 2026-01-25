@@ -2,6 +2,7 @@ package com.aei.innovision
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.graphics.RectF
 import android.util.Log
 import org.tensorflow.lite.DataType
@@ -105,6 +106,12 @@ class PostItDetector(context: Context) {
         )
     }
 
+    private fun rotateBitmap(bitmap: Bitmap, degrees: Int): Bitmap {
+        if (degrees == 0) return bitmap
+        val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }
+
     private fun letterbox(bitmap: Bitmap, dstSize: Int): Pair<Bitmap, Letterbox> {
         val srcW = bitmap.width
         val srcH = bitmap.height
@@ -134,16 +141,13 @@ class PostItDetector(context: Context) {
         val modelHeight = inputShape[1]
         val modelWidth = inputShape[2]
 
-        // 1) Preprocess (rotate then resize+normalize)
-        //var tensorImage = TensorImage(DataType.FLOAT32)
-        //tensorImage.load(bitmap)
-
+        // 1) Rotate bitmap to upright orientation first
+        // This ensures coordinates will be in display space (matching PreviewView)
         val rot = ((rotationDegrees % 360) + 360) % 360
-        val rotProc = rotProcessors[rot] ?: rotProcessors[0]!!
-        //tensorImage = rotProc.process(tensorImage)
-        //tensorImage = baseProcessor.process(tensorImage)
+        val rotatedBitmap = rotateBitmap(bitmap, rot)
 
-        val (lbBitmap, lb) = letterbox(bitmap, modelWidth)
+        // 2) Letterbox the rotated bitmap
+        val (lbBitmap, lb) = letterbox(rotatedBitmap, modelWidth)
 
         var tensorImage = TensorImage(DataType.FLOAT32)
         tensorImage.load(lbBitmap)
@@ -153,19 +157,11 @@ class PostItDetector(context: Context) {
 
         tensorImage = imageProcessor.process(tensorImage)
 
-
-        // 2) Inference
+        // 3) Inference
         interpreter.run(tensorImage.buffer, outputBuffer)
 
-        // 3) Decode -> detections (in ORIGINAL bitmap coordinates)
+        // 4) Decode -> detections (in ROTATED/DISPLAY coordinates)
         val detections = mutableListOf<Detection>()
-
-        val isRotated90or270 = rot == 90 || rot == 270
-        val rotatedWidth = if (isRotated90or270) bitmap.height else bitmap.width
-        val rotatedHeight = if (isRotated90or270) bitmap.width else bitmap.height
-
-        //val scaleX = rotatedWidth.toFloat() / modelWidth
-        //val scaleY = rotatedHeight.toFloat() / modelHeight
 
         for (i in 0 until 8400) {
             val score = outputBuffer[0][4][i]
@@ -184,29 +180,23 @@ class PostItDetector(context: Context) {
                 h *= modelHeight
             }
 
-            // Box in rotated space
-            val xCenterPx = xCenter
-            val yCenterPx = yCenter
-            val wPx = w
-            val hPx = h
-
-// ---- UN-LETTERBOX ----
-            val x = (xCenterPx - lb.dx) / lb.scale
-            val y = (yCenterPx - lb.dy) / lb.scale
-            val boxW = wPx / lb.scale
-            val boxH = hPx / lb.scale
+            // Un-letterbox to rotated bitmap coordinates
+            val x = (xCenter - lb.dx) / lb.scale
+            val y = (yCenter - lb.dy) / lb.scale
+            val boxW = w / lb.scale
+            val boxH = h / lb.scale
 
             val left = x - boxW / 2f
             val top = y - boxH / 2f
             val right = x + boxW / 2f
             val bottom = y + boxH / 2f
 
-// Clamp to bitmap bounds (important for stability)
+            // Clamp to rotated bitmap bounds
             val clamped = RectF(
-                left.coerceIn(0f, bitmap.width.toFloat()),
-                top.coerceIn(0f, bitmap.height.toFloat()),
-                right.coerceIn(0f, bitmap.width.toFloat()),
-                bottom.coerceIn(0f, bitmap.height.toFloat())
+                left.coerceIn(0f, rotatedBitmap.width.toFloat()),
+                top.coerceIn(0f, rotatedBitmap.height.toFloat()),
+                right.coerceIn(0f, rotatedBitmap.width.toFloat()),
+                bottom.coerceIn(0f, rotatedBitmap.height.toFloat())
             )
 
             detections.add(
