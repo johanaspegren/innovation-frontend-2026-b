@@ -120,9 +120,15 @@ class MainActivity : AppCompatActivity() {
             val rotationDegrees = imageProxy.imageInfo.rotationDegrees
             val bitmap = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
             yuvToRgbConverter.yuvToRgb(mediaImage, bitmap)
-            
+
             // Pass the rotation degrees to the detector
             val detections = postItDetector.detect(bitmap, rotationDegrees)
+
+            // Calculate rotated dimensions - matches how PreviewView displays the image
+            // and how PostItDetector now returns coordinates (in rotated/display space)
+            val isRotated90or270 = rotationDegrees == 90 || rotationDegrees == 270
+            val displayWidth = if (isRotated90or270) bitmap.height else bitmap.width
+            val displayHeight = if (isRotated90or270) bitmap.width else bitmap.height
 
             val image = InputImage.fromMediaImage(
                 mediaImage,
@@ -131,11 +137,11 @@ class MainActivity : AppCompatActivity() {
 
             recognizer.process(image)
                 .addOnSuccessListener { visionText ->
-                    onResult(visionText.text, detections, bitmap.width, bitmap.height)
+                    onResult(visionText.text, detections, displayWidth, displayHeight)
                 }
                 .addOnFailureListener { error ->
                     Log.e("MainActivity", "Text recognition failed", error)
-                    onResult("", detections, bitmap.width, bitmap.height)
+                    onResult("", detections, displayWidth, displayHeight)
                 }
                 .addOnCompleteListener {
                     imageProxy.close()
