@@ -77,18 +77,24 @@ class OverlayView @JvmOverloads constructor(
 
             val line1 = "$label $conf"
             val line2 = "x=$cx y=$cy"
+            // Show OCR text if available (truncate if too long)
+            val ocrText = if (det.ocrText.isNotBlank()) {
+                if (det.ocrText.length > 30) det.ocrText.take(30) + "..." else det.ocrText
+            } else ""
 
             val textPadding = 8f
             val lineHeight = textPaint.textSize + 6f
+            val numLines = if (ocrText.isNotBlank()) 3 else 2
 
             val textWidth = maxOf(
                 textPaint.measureText(line1),
-                textPaint.measureText(line2)
+                textPaint.measureText(line2),
+                if (ocrText.isNotBlank()) textPaint.measureText(ocrText) else 0f
             )
 
             val bgRect = RectF(
                 rect.left,
-                rect.top - lineHeight * 2 - textPadding * 2,
+                rect.top - lineHeight * numLines - textPadding * 2,
                 rect.left + textWidth + textPadding * 2,
                 rect.top
             )
@@ -110,6 +116,16 @@ class OverlayView @JvmOverloads constructor(
                 bgRect.top + lineHeight * 2,
                 textPaint
             )
+
+            // Draw OCR text if available
+            if (ocrText.isNotBlank()) {
+                canvas.drawText(
+                    ocrText,
+                    bgRect.left + textPadding,
+                    bgRect.top + lineHeight * 3,
+                    textPaint
+                )
+            }
         }
     }
 }

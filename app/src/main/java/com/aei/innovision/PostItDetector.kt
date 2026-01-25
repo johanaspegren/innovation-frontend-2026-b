@@ -28,7 +28,13 @@ private data class Letterbox(
 
 class PostItDetector(context: Context) {
 
-    data class Detection(val rect: RectF, val label: String, val score: Float, val trackId: Int? = null)
+    data class Detection(
+        val rect: RectF,
+        val label: String,
+        val score: Float,
+        val trackId: Int? = null,
+        var ocrText: String = ""  // OCR result for this detection
+    )
 
     // Internal tracked box (stable across frames)
     private data class Track(
