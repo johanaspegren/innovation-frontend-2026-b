@@ -1,7 +1,6 @@
 package com.aei.innovision
 
 import android.Manifest
-import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -11,8 +10,10 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import android.view.KeyEvent
+import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
@@ -23,7 +24,6 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.aei.innovision.databinding.ActivityMainBinding
 import com.google.android.gms.tasks.Tasks
@@ -56,7 +56,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     // Voice Components
     private lateinit var tts: TextToSpeech
-    private lateinit var speechRecognizer: SpeechRecognizer
+    private var speechRecognizer: SpeechRecognizer? = null
     private var isListening = false
     private var lastAskedTrackId: Int? = null
 
@@ -70,15 +70,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         "Innovation"
     )
 
-    // Track locked post-its: user confirmed OCR text (trackId -> locked text)
     private val lockedPostIts = mutableMapOf<Int, String>()
-    
-    // Stabilize suggestions: trackId -> last matched suggestion
     private val matchedSuggestions = mutableMapOf<Int, String>()
-
-    // Track which post-its have been uploaded or are in-flight
     private val uploadedTrackIds = mutableSetOf<Int>()
     private val uploadingTrackIds = mutableSetOf<Int>()
+
+    private val TAG = "InnovisionMain"
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -88,6 +85,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
         if (permissions[Manifest.permission.RECORD_AUDIO] == true) {
             initSpeechRecognizer()
+        } else {
+            Toast.makeText(this, "Microphone permission required for voice assistant", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -101,12 +100,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         postItDetector = PostItDetector(this)
         tts = TextToSpeech(this, this)
 
-        // Tap on a detection box to lock its OCR text
         binding.overlayView.onDetectionTapped = { detection ->
             toggleLock(detection)
         }
 
-        // Reset button: clears all locked/uploaded state
         binding.uploadButton.setOnClickListener {
             resetAll()
         }
@@ -140,72 +137,147 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             tts.language = Locale.US
+            tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    Log.d(TAG, "TTS Start: $utteranceId")
+                }
+                override fun onDone(utteranceId: String?) {
+                    Log.d(TAG, "TTS Done: $utteranceId")
+                    if (utteranceId == "ask_confirmation") {
+                        runOnUiThread { startListening() }
+                    }
+                }
+                override fun onError(utteranceId: String?) {
+                    Log.e(TAG, "TTS Error: $utteranceId")
+                    if (utteranceId == "ask_confirmation") {
+                        runOnUiThread { startListening() }
+                    }
+                }
+            })
         }
     }
 
     private fun initSpeechRecognizer() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) return
-
-        // On some devices (like Pixel), the default SpeechRecognizer might point to an internal
-        // service (like SODA) that third-party apps are not allowed to bind to, causing a SecurityException.
-        // We explicitly target the standard Google Recognition Service to avoid this.
-        val googleServiceComponent = ComponentName(
-            "com.google.android.googlequicksearchbox",
-            "com.google.android.voicesearch.service.GoogleRecognitionService"
-        )
-
-        speechRecognizer = try {
-            SpeechRecognizer.createSpeechRecognizer(this, googleServiceComponent)
-        } catch (e: Exception) {
-            // Fallback to default if the explicit component is not found or fails
-            SpeechRecognizer.createSpeechRecognizer(this)
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Log.e(TAG, "Speech Recognition not available")
+            runOnUiThread { binding.statusText.text = "Voice Assistant: N/A" }
+            return
         }
 
-        speechRecognizer.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) { isListening = true }
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
+        speechRecognizer?.destroy()
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) { 
+                Log.d(TAG, "Speech Engine Ready")
+                isListening = true
+                runOnUiThread { 
+                    binding.statusText.text = "Listening..."
+                    binding.micIcon.visibility = View.VISIBLE
+                }
+            }
+            override fun onBeginningOfSpeech() {
+                Log.d(TAG, "Speech Beginning")
+                runOnUiThread { binding.statusText.text = "Recording..." }
+            }
+            override fun onRmsChanged(rmsdB: Float) {
+                // Log RMS to see if mic is picking up sound
+                if (rmsdB > 2.0f) {
+                    Log.v(TAG, "Mic RMS: $rmsdB")
+                }
+            }
             override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() { isListening = false }
-            override fun onError(error: Int) { isListening = false }
+            override fun onEndOfSpeech() { 
+                Log.d(TAG, "Speech End")
+                isListening = false
+                runOnUiThread { 
+                    binding.statusText.text = "Processing..."
+                    binding.micIcon.visibility = View.GONE
+                }
+            }
+            override fun onError(error: Int) { 
+                isListening = false
+                val message = when (error) {
+                    SpeechRecognizer.ERROR_AUDIO -> "Audio error"
+                    SpeechRecognizer.ERROR_CLIENT -> "Client error"
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Permissions error"
+                    SpeechRecognizer.ERROR_NETWORK -> "Network error"
+                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
+                    SpeechRecognizer.ERROR_NO_MATCH -> "No match"
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Busy"
+                    SpeechRecognizer.ERROR_SERVER -> "Server error"
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Timeout"
+                    else -> "Error $error"
+                }
+                Log.e(TAG, "Speech Error: $message")
+                runOnUiThread { 
+                    binding.statusText.text = "Voice Error: $message"
+                    binding.micIcon.visibility = View.GONE
+                }
+            }
             override fun onResults(results: Bundle?) {
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                if (matches != null) {
+                if (matches != null && matches.isNotEmpty()) {
                     val text = matches[0].lowercase()
-                    if (text.contains("yes") || text.contains("save") || text.contains("confirm") || text.contains("correct")) {
+                    Log.d(TAG, "Heard: $text")
+                    runOnUiThread { binding.statusText.text = "Heard: \"$text\"" }
+                    if (text.contains("yes") || text.contains("save") || text.contains("confirm") || text.contains("correct") || text.contains("yeah")) {
                         val focused = binding.overlayView.getFocusedDetection()
                         if (focused != null && !focused.locked) {
                             runOnUiThread { toggleLock(focused) }
-                            speak("Saved")
+                            speak("Saved", "confirm_done")
                         }
                     }
                 }
                 isListening = false
+                runOnUiThread { binding.micIcon.visibility = View.GONE }
             }
-            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onPartialResults(partialResults: Bundle?) {
+                val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (matches != null && matches.isNotEmpty()) {
+                    runOnUiThread { binding.statusText.text = "Heard: \"${matches[0]}\"..." }
+                }
+            }
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
     }
 
     private fun startListening() {
-        if (isListening || !::speechRecognizer.isInitialized) return
+        if (isListening || speechRecognizer == null) return
+        
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+            // Force it to stay open longer if needed
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+            putExtra("android.speech.extras.SPEECH_INPUT_MINIMUM_STEADY_SILENCE_IN_MILLIS", 2000L)
         }
-        speechRecognizer.startListening(intent)
+        
+        runOnUiThread { 
+            try {
+                Log.d(TAG, "Invoking Speech Engine")
+                binding.statusText.text = "Mic starting..."
+                speechRecognizer?.startListening(intent) 
+            } catch (e: Exception) {
+                Log.e(TAG, "Start Listening Failed", e)
+                binding.statusText.text = "Voice Error: Failed"
+                binding.micIcon.visibility = View.GONE
+            }
+        }
     }
 
-    private fun speak(text: String) {
-        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "innovision_tts")
+    private fun speak(text: String, utteranceId: String = "innovision_tts") {
+        Log.d(TAG, "Speaking: $text")
+        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
     }
 
     private fun toggleLock(detection: PostItDetector.Detection) {
-        // Stop assistant if it's currently speaking or listening
         if (tts.isSpeaking) tts.stop()
-        if (isListening && ::speechRecognizer.isInitialized) {
-            speechRecognizer.stopListening()
+        if (isListening) {
+            speechRecognizer?.stopListening()
             isListening = false
+            runOnUiThread { binding.micIcon.visibility = View.GONE }
         }
 
         val trackId = detection.trackId
@@ -236,18 +308,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val trackId = focused.trackId ?: return
         
         if (focused.ocrText.isNotBlank() && !focused.locked && !focused.uploaded && trackId != lastAskedTrackId) {
-            if (matchedSuggestions.containsKey(trackId)) {
-                lastAskedTrackId = trackId
-                val suggestion = focused.ocrText
-                speak("Save $suggestion?")
-                
-                binding.root.postDelayed({
-                    // Only start listening if the user didn't manually lock it while we were talking
-                    if (lastAskedTrackId == trackId && !focused.locked) {
-                        startListening()
-                    }
-                }, 1500)
-            }
+            lastAskedTrackId = trackId
+            val suggestion = focused.ocrText
+            speak("Save $suggestion?", "ask_confirmation")
         }
     }
 
@@ -287,13 +350,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         postItDetector.close()
         tts.stop()
         tts.shutdown()
-        if (::speechRecognizer.isInitialized) {
-            speechRecognizer.destroy()
-        }
-    }
-
-    private fun hasCameraPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        speechRecognizer?.destroy()
     }
 
     private fun startCamera() {
@@ -311,7 +368,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     .also {
                         it.setAnalyzer(cameraExecutor, PostItAnalyzer { text, detections, width, height ->
                             runOnUiThread {
-                                binding.statusText.text = if (text.isBlank()) "Looking for post-its..." else text
+                                val currentStatus = binding.statusText.text.toString()
+                                val voiceStates = listOf("Heard", "Listening...", "Recording...", "Processing...", "Voice Error", "Mic starting...")
+                                if (voiceStates.any { currentStatus.startsWith(it) }) {
+                                    // Keep voice status
+                                } else {
+                                    binding.statusText.text = if (text.isBlank()) "Looking for post-its..." else text
+                                }
                                 binding.overlayView.setDetections(detections, width, height)
                                 processVoiceAssistant(detections)
                             }
