@@ -36,9 +36,9 @@ class MainActivity : AppCompatActivity() {
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     private val apiService = PostItApiService()
 
-    // Current state for upload
-    @Volatile private var currentDetections: List<PostItDetector.Detection> = emptyList()
-    @Volatile private var currentBitmap: Bitmap? = null
+    // Track which post-its have been uploaded or are in-flight
+    private val uploadedTrackIds = mutableSetOf<Int>()
+    private val uploadingTrackIds = mutableSetOf<Int>()
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -59,8 +59,11 @@ class MainActivity : AppCompatActivity() {
         yuvToRgbConverter = YuvToRgbConverter(this)
         postItDetector = PostItDetector(this)
 
+        // Reset button: clears uploaded state so post-its can be re-sent
         binding.uploadButton.setOnClickListener {
-            uploadCurrentPostIts()
+            uploadedTrackIds.clear()
+            uploadingTrackIds.clear()
+            Toast.makeText(this, "Upload state reset", Toast.LENGTH_SHORT).show()
         }
 
         if (hasCameraPermission()) {
@@ -70,38 +73,39 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun uploadCurrentPostIts() {
-        val detections = currentDetections
-        val bitmap = currentBitmap
-
-        if (detections.isEmpty()) {
-            Toast.makeText(this, "No post-its detected to upload", Toast.LENGTH_SHORT).show()
-            return
+    private fun autoUploadNewDetections(
+        detections: List<PostItDetector.Detection>,
+        image: Bitmap
+    ) {
+        // Find detections with OCR text that haven't been uploaded yet
+        val toUpload = detections.filter { det ->
+            det.trackId != null &&
+                det.ocrText.isNotBlank() &&
+                det.trackId !in uploadedTrackIds &&
+                det.trackId !in uploadingTrackIds
         }
 
-        binding.uploadButton.isEnabled = false
-        Toast.makeText(this, "Uploading ${detections.size} post-its...", Toast.LENGTH_SHORT).show()
+        if (toUpload.isEmpty()) return
 
-        apiService.uploadPostIts(detections, bitmap) { result ->
-            runOnUiThread {
-                binding.uploadButton.isEnabled = true
-                result.fold(
-                    onSuccess = { response ->
-                        Toast.makeText(
-                            this,
-                            "Uploaded ${detections.size} post-its successfully!",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    },
-                    onFailure = { error ->
-                        Toast.makeText(
-                            this,
-                            "Upload failed: ${error.message}",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
-                )
-            }
+        // Mark as in-flight
+        val trackIds = toUpload.mapNotNull { it.trackId }.toSet()
+        uploadingTrackIds.addAll(trackIds)
+
+        Log.d("MainActivity", "Auto-uploading ${toUpload.size} new post-its (trackIds: $trackIds)")
+
+        apiService.uploadPostIts(toUpload, image) { result ->
+            result.fold(
+                onSuccess = {
+                    Log.d("MainActivity", "Upload confirmed for trackIds: $trackIds")
+                    uploadedTrackIds.addAll(trackIds)
+                    uploadingTrackIds.removeAll(trackIds)
+                },
+                onFailure = { error ->
+                    Log.e("MainActivity", "Upload failed for trackIds: $trackIds", error)
+                    // Remove from in-flight so retry is possible on next frame
+                    uploadingTrackIds.removeAll(trackIds)
+                }
+            )
         }
     }
 
@@ -235,14 +239,20 @@ class MainActivity : AppCompatActivity() {
             // Wait for all OCR tasks to complete
             Tasks.whenAllComplete(ocrTasks)
                 .addOnCompleteListener {
+                    // Mark detections that have already been uploaded
+                    detections.forEach { det ->
+                        if (det.trackId != null && det.trackId in uploadedTrackIds) {
+                            det.uploaded = true
+                        }
+                    }
+
+                    // Auto-upload any new detections with OCR text
+                    autoUploadNewDetections(detections, rotatedBitmap)
+
                     // Combine all OCR text for the status display
                     val combinedText = detections
                         .filter { it.ocrText.isNotBlank() }
                         .joinToString("\n") { it.ocrText }
-
-                    // Store current state for upload
-                    currentDetections = detections.toList()
-                    currentBitmap = rotatedBitmap.copy(rotatedBitmap.config, false)
 
                     onResult(combinedText, detections, displayWidth, displayHeight)
                     imageProxy.close()

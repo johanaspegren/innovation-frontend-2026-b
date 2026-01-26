@@ -14,15 +14,29 @@ class OverlayView @JvmOverloads constructor(
     attrs: AttributeSet? = null,
 ) : View(context, attrs) {
 
-    private val boxPaint = Paint().apply {
+    private val pendingBoxPaint = Paint().apply {
         style = Paint.Style.STROKE
         strokeWidth = 6f
         color = Color.YELLOW
         isAntiAlias = true
     }
 
+    private val storedBoxPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 6f
+        color = Color.GREEN
+        isAntiAlias = true
+    }
+
     private val textPaint = Paint().apply {
         color = Color.WHITE
+        textSize = 32f
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+
+    private val storedTextPaint = Paint().apply {
+        color = Color.GREEN
         textSize = 32f
         style = Paint.Style.FILL
         isAntiAlias = true
@@ -65,18 +79,16 @@ class OverlayView @JvmOverloads constructor(
                 det.rect.bottom * scaleY
             )
 
-            // Draw bounding box
-            canvas.drawRect(rect, boxPaint)
+            // Draw bounding box - green if stored, yellow if pending
+            val boxPaint = if (det.uploaded) storedBoxPaint else pendingBoxPaint
 
-            // Compute center in IMAGE coordinates (important!)
-            val cx = ((det.rect.left + det.rect.right) / 2f).roundToInt()
-            val cy = ((det.rect.top + det.rect.bottom) / 2f).roundToInt()
+            canvas.drawRect(rect, boxPaint)
 
             val label = det.label
             val conf = String.format("%.2f", det.score)
+            val statusTag = if (det.uploaded) " [STORED]" else ""
 
-            val line1 = "$label $conf"
-            val line2 = "x=$cx y=$cy"
+            val line1 = "$label $conf$statusTag"
             // Show OCR text if available (truncate if too long)
             val ocrText = if (det.ocrText.isNotBlank()) {
                 if (det.ocrText.length > 30) det.ocrText.take(30) + "..." else det.ocrText
@@ -84,11 +96,12 @@ class OverlayView @JvmOverloads constructor(
 
             val textPadding = 8f
             val lineHeight = textPaint.textSize + 6f
-            val numLines = if (ocrText.isNotBlank()) 3 else 2
+            val numLines = if (ocrText.isNotBlank()) 2 else 1
+
+            val labelPaint = if (det.uploaded) storedTextPaint else textPaint
 
             val textWidth = maxOf(
-                textPaint.measureText(line1),
-                textPaint.measureText(line2),
+                labelPaint.measureText(line1),
                 if (ocrText.isNotBlank()) textPaint.measureText(ocrText) else 0f
             )
 
@@ -102,19 +115,12 @@ class OverlayView @JvmOverloads constructor(
             // Background for readability
             canvas.drawRect(bgRect, bgPaint)
 
-            // Draw text
+            // Draw label line
             canvas.drawText(
                 line1,
                 bgRect.left + textPadding,
                 bgRect.top + lineHeight,
-                textPaint
-            )
-
-            canvas.drawText(
-                line2,
-                bgRect.left + textPadding,
-                bgRect.top + lineHeight * 2,
-                textPaint
+                labelPaint
             )
 
             // Draw OCR text if available
@@ -122,7 +128,7 @@ class OverlayView @JvmOverloads constructor(
                 canvas.drawText(
                     ocrText,
                     bgRect.left + textPadding,
-                    bgRect.top + lineHeight * 3,
+                    bgRect.top + lineHeight * 2,
                     textPaint
                 )
             }
