@@ -60,8 +60,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var isListening = false
     private var lastAskedTrackId: Int? = null
 
-    // Simulated suggestions from backend
-    private val suggestedContents = listOf(
+    // Suggestions from backend (initialized with defaults)
+    private var suggestedContents = mutableListOf(
         "Cool Stuff",
         "MORE AI",
         "Refinement",
@@ -108,7 +108,33 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             resetAll()
         }
 
+        initWebSocket()
         checkPermissions()
+    }
+
+    private fun initWebSocket() {
+        apiService.onConnectionStatusChanged = { connected ->
+            runOnUiThread {
+                binding.statusText.text = if (connected) "Connected to Backend" else "Backend Offline"
+                Toast.makeText(this, if (connected) "Backend Connected" else "Backend Connection Lost", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        apiService.onSuggestionsReceived = { newSuggestions ->
+            runOnUiThread {
+                suggestedContents.clear()
+                suggestedContents.addAll(newSuggestions)
+                Log.d(TAG, "Updated suggestions: $newSuggestions")
+            }
+        }
+
+        apiService.onSpeechRequested = { text ->
+            runOnUiThread {
+                speak(text, "backend_request")
+            }
+        }
+
+        apiService.startWebSocket()
     }
 
     private fun checkPermissions() {
@@ -180,7 +206,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 runOnUiThread { binding.statusText.text = "Recording..." }
             }
             override fun onRmsChanged(rmsdB: Float) {
-                // Log RMS to see if mic is picking up sound
                 if (rmsdB > 2.0f) {
                     Log.v(TAG, "Mic RMS: $rmsdB")
                 }
@@ -249,7 +274,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
-            // Force it to stay open longer if needed
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
             putExtra("android.speech.extras.SPEECH_INPUT_MINIMUM_STEADY_SILENCE_IN_MILLIS", 2000L)
         }
@@ -351,6 +375,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tts.stop()
         tts.shutdown()
         speechRecognizer?.destroy()
+        apiService.stopWebSocket()
     }
 
     private fun startCamera() {
@@ -369,9 +394,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         it.setAnalyzer(cameraExecutor, PostItAnalyzer { text, detections, width, height ->
                             runOnUiThread {
                                 val currentStatus = binding.statusText.text.toString()
-                                val voiceStates = listOf("Heard", "Listening...", "Recording...", "Processing...", "Voice Error", "Mic starting...")
+                                val voiceStates = listOf("Heard", "Listening...", "Recording...", "Processing...", "Voice Error", "Mic starting...", "Connected to Backend", "Backend Offline")
                                 if (voiceStates.any { currentStatus.startsWith(it) }) {
-                                    // Keep voice status
+                                    // Keep important status
                                 } else {
                                     binding.statusText.text = if (text.isBlank()) "Looking for post-its..." else text
                                 }
