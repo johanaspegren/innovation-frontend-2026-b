@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.Bundle
 import android.util.Log
+import android.view.KeyEvent
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
@@ -73,19 +74,7 @@ class MainActivity : AppCompatActivity() {
 
         // Tap on a detection box to lock its OCR text
         binding.overlayView.onDetectionTapped = { detection ->
-            val trackId = detection.trackId
-            if (trackId != null && detection.ocrText.isNotBlank()) {
-                if (trackId in lockedPostIts) {
-                    // Already locked - unlock it
-                    lockedPostIts.remove(trackId)
-                    Toast.makeText(this, "Unlocked post-it #$trackId", Toast.LENGTH_SHORT).show()
-                } else {
-                    lockedPostIts[trackId] = detection.ocrText
-                    Toast.makeText(this, "Locked: \"${detection.ocrText}\"", Toast.LENGTH_SHORT).show()
-                }
-            } else if (trackId != null && detection.ocrText.isBlank()) {
-                Toast.makeText(this, "No text detected yet - try again", Toast.LENGTH_SHORT).show()
-            }
+            toggleLock(detection)
         }
 
         // Reset button: clears all locked/uploaded state
@@ -101,6 +90,33 @@ class MainActivity : AppCompatActivity() {
         } else {
             requestPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
+    }
+
+    private fun toggleLock(detection: PostItDetector.Detection) {
+        val trackId = detection.trackId
+        if (trackId != null && detection.ocrText.isNotBlank()) {
+            if (trackId in lockedPostIts) {
+                // Already locked - unlock it
+                lockedPostIts.remove(trackId)
+                Toast.makeText(this, "Unlocked post-it #$trackId", Toast.LENGTH_SHORT).show()
+            } else {
+                lockedPostIts[trackId] = detection.ocrText
+                Toast.makeText(this, "Locked: \"${detection.ocrText}\"", Toast.LENGTH_SHORT).show()
+            }
+        } else if (trackId != null && detection.ocrText.isBlank()) {
+            Toast.makeText(this, "No text detected yet - try again", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
+            val focused = binding.overlayView.getFocusedDetection()
+            if (focused != null) {
+                toggleLock(focused)
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
     }
 
     private fun autoUploadNewDetections(

@@ -8,6 +8,7 @@ import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
+import kotlin.math.sqrt
 
 class OverlayView @JvmOverloads constructor(
     context: Context,
@@ -18,6 +19,13 @@ class OverlayView @JvmOverloads constructor(
         style = Paint.Style.STROKE
         strokeWidth = 6f
         color = Color.YELLOW
+        isAntiAlias = true
+    }
+
+    private val focusedBoxPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 8f
+        color = Color.parseColor("#4285F4") // Google/Link Blue
         isAntiAlias = true
     }
 
@@ -42,6 +50,13 @@ class OverlayView @JvmOverloads constructor(
         isAntiAlias = true
     }
 
+    private val focusedTextPaint = Paint().apply {
+        color = Color.parseColor("#4285F4")
+        textSize = 32f
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+
     private val lockedTextPaint = Paint().apply {
         color = Color.CYAN
         textSize = 32f
@@ -61,11 +76,22 @@ class OverlayView @JvmOverloads constructor(
         style = Paint.Style.FILL
     }
 
+    private val reticlePaint = Paint().apply {
+        color = Color.WHITE
+        alpha = 128 // subtle transparency
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        isAntiAlias = true
+    }
+
     private var detections: List<PostItDetector.Detection> = emptyList()
     private var imageWidth: Int = 0
     private var imageHeight: Int = 0
 
-    // Callback when a detection box is tapped
+    // The detection currently in the center of the view
+    private var focusedDetection: PostItDetector.Detection? = null
+
+    // Callback when a detection box is tapped (or selected via center-focus)
     var onDetectionTapped: ((PostItDetector.Detection) -> Unit)? = null
 
     fun setDetections(
@@ -76,8 +102,30 @@ class OverlayView @JvmOverloads constructor(
         this.detections = detections
         this.imageWidth = imageWidth
         this.imageHeight = imageHeight
+        updateFocusedDetection()
         invalidate()
     }
+
+    private fun updateFocusedDetection() {
+        if (imageWidth == 0 || imageHeight == 0 || detections.isEmpty()) {
+            focusedDetection = null
+            return
+        }
+
+        val centerX = imageWidth / 2f
+        val centerY = imageHeight / 2f
+
+        // Find detection whose center is closest to image center
+        focusedDetection = detections.minByOrNull { det ->
+            val detCenterX = det.rect.centerX()
+            val detCenterY = det.rect.centerY()
+            val dx = detCenterX - centerX
+            val dy = detCenterY - centerY
+            sqrt((dx * dx + dy * dy).toDouble())
+        }
+    }
+
+    fun getFocusedDetection(): PostItDetector.Detection? = focusedDetection
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (event.action != MotionEvent.ACTION_DOWN) return super.onTouchEvent(event)
@@ -114,6 +162,13 @@ class OverlayView @JvmOverloads constructor(
         val scaleX = width / imageWidth.toFloat()
         val scaleY = height / imageHeight.toFloat()
 
+        // Draw a subtle small reticle in the center for Glass users
+        val viewCenterX = width / 2f
+        val viewCenterY = height / 2f
+        val reticleSize = 12f // Reduced size
+        canvas.drawLine(viewCenterX - reticleSize, viewCenterY, viewCenterX + reticleSize, viewCenterY, reticlePaint)
+        canvas.drawLine(viewCenterX, viewCenterY - reticleSize, viewCenterX, viewCenterY + reticleSize, reticlePaint)
+
         detections.forEach { det ->
 
             // Scale rect to view coordinates
@@ -124,8 +179,9 @@ class OverlayView @JvmOverloads constructor(
                 det.rect.bottom * scaleY
             )
 
-            // Draw bounding box: green=stored, cyan=locked, yellow=pending
+            // Draw bounding box: focus=blue, green=stored, cyan=locked, yellow=pending
             val boxPaint = when {
+                det == focusedDetection && !det.locked && !det.uploaded -> focusedBoxPaint
                 det.uploaded -> storedBoxPaint
                 det.locked -> lockedBoxPaint
                 else -> pendingBoxPaint
@@ -138,6 +194,7 @@ class OverlayView @JvmOverloads constructor(
             val statusTag = when {
                 det.uploaded -> " [STORED]"
                 det.locked -> " [LOCKED]"
+                det == focusedDetection -> " [FOCUS]"
                 else -> ""
             }
 
@@ -154,6 +211,7 @@ class OverlayView @JvmOverloads constructor(
             val labelPaint = when {
                 det.uploaded -> storedTextPaint
                 det.locked -> lockedTextPaint
+                det == focusedDetection -> focusedTextPaint
                 else -> textPaint
             }
 

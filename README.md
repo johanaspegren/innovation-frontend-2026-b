@@ -8,6 +8,12 @@ Android starter for detecting post-its, running OCR, and surfacing extracted tex
 - Simple color-based post-it detection with overlay boxes.
 - Kotlin + ViewBinding setup.
 
+## Hardware Support
+### Google Glass (Enterprise Edition 2)
+The project is compatible with Google Glass. 
+- **Setup:** Enable Developer Options (tap Build Number 7 times) and enable USB Debugging.
+- **Input:** Since Glass lacks a touchscreen, use the touchpad (mapped to `DPAD` keys) for interaction.
+
 ## Handwriting note
 ML Kit text recognition works best for printed text. For handwriting accuracy, consider:
 - Cloud Vision (higher accuracy, requires network).
@@ -27,6 +33,6 @@ gradle wrapper
 ```
 
 ## Next steps
+- **Glass UX:** Implement "Gaze and Confirm" selection using the center of the FOV and touchpad taps (`KEYCODE_DPAD_CENTER`).
 - Replace the heuristic detector with a trained model and crop detected regions before OCR.
-- Add a post-it detector (TFLite model) and crop detected regions before OCR.
 - Build export pipeline to Neo4j (JSON -> API -> Neo4j).
