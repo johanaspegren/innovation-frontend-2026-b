@@ -33,7 +33,9 @@ class PostItDetector(context: Context) {
         val label: String,
         val score: Float,
         val trackId: Int? = null,
-        var ocrText: String = ""  // OCR result for this detection
+        var ocrText: String = "",
+        var uploaded: Boolean = false,
+        var locked: Boolean = false
     )
 
     // Internal tracked box (stable across frames)

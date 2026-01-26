@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
@@ -33,6 +34,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var postItDetector: PostItDetector
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private val apiService = PostItApiService()
+
+    // Track locked post-its: user tapped to confirm OCR text (trackId -> locked text)
+    private val lockedPostIts = mutableMapOf<Int, String>()
+
+    // Track which post-its have been uploaded or are in-flight
+    private val uploadedTrackIds = mutableSetOf<Int>()
+    private val uploadingTrackIds = mutableSetOf<Int>()
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -53,10 +62,72 @@ class MainActivity : AppCompatActivity() {
         yuvToRgbConverter = YuvToRgbConverter(this)
         postItDetector = PostItDetector(this)
 
+        // Tap on a detection box to lock its OCR text
+        binding.overlayView.onDetectionTapped = { detection ->
+            val trackId = detection.trackId
+            if (trackId != null && detection.ocrText.isNotBlank()) {
+                if (trackId in lockedPostIts) {
+                    // Already locked - unlock it
+                    lockedPostIts.remove(trackId)
+                    Toast.makeText(this, "Unlocked post-it #$trackId", Toast.LENGTH_SHORT).show()
+                } else {
+                    lockedPostIts[trackId] = detection.ocrText
+                    Toast.makeText(this, "Locked: \"${detection.ocrText}\"", Toast.LENGTH_SHORT).show()
+                }
+            } else if (trackId != null && detection.ocrText.isBlank()) {
+                Toast.makeText(this, "No text detected yet - try again", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // Reset button: clears all locked/uploaded state
+        binding.uploadButton.setOnClickListener {
+            lockedPostIts.clear()
+            uploadedTrackIds.clear()
+            uploadingTrackIds.clear()
+            Toast.makeText(this, "All states reset", Toast.LENGTH_SHORT).show()
+        }
+
         if (hasCameraPermission()) {
             startCamera()
         } else {
             requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun autoUploadNewDetections(
+        detections: List<PostItDetector.Detection>,
+        image: Bitmap
+    ) {
+        // Only upload locked detections that haven't been uploaded yet
+        val toUpload = detections.filter { det ->
+            det.trackId != null &&
+                det.locked &&
+                det.ocrText.isNotBlank() &&
+                det.trackId !in uploadedTrackIds &&
+                det.trackId !in uploadingTrackIds
+        }
+
+        if (toUpload.isEmpty()) return
+
+        // Mark as in-flight
+        val trackIds = toUpload.mapNotNull { it.trackId }.toSet()
+        uploadingTrackIds.addAll(trackIds)
+
+        Log.d("MainActivity", "Auto-uploading ${toUpload.size} new post-its (trackIds: $trackIds)")
+
+        apiService.uploadPostIts(toUpload, image) { result ->
+            result.fold(
+                onSuccess = {
+                    Log.d("MainActivity", "Upload confirmed for trackIds: $trackIds")
+                    uploadedTrackIds.addAll(trackIds)
+                    uploadingTrackIds.removeAll(trackIds)
+                },
+                onFailure = { error ->
+                    Log.e("MainActivity", "Upload failed for trackIds: $trackIds", error)
+                    // Remove from in-flight so retry is possible on next frame
+                    uploadingTrackIds.removeAll(trackIds)
+                }
+            )
         }
     }
 
@@ -170,26 +241,46 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            // Run OCR on each detected post-it region
+            // Apply locked/uploaded state before OCR
+            detections.forEach { det ->
+                val trackId = det.trackId ?: return@forEach
+                if (trackId in lockedPostIts) {
+                    det.locked = true
+                    det.ocrText = lockedPostIts[trackId] ?: ""
+                }
+                if (trackId in uploadedTrackIds) {
+                    det.uploaded = true
+                }
+            }
+
+            // Run OCR only on non-locked detected post-it regions
             val ocrTasks = detections.map { detection ->
-                val croppedBitmap = cropDetectionRegion(rotatedBitmap, detection.rect)
-                if (croppedBitmap != null) {
-                    val inputImage = InputImage.fromBitmap(croppedBitmap, 0)
-                    recognizer.process(inputImage)
-                        .continueWith { task ->
-                            if (task.isSuccessful) {
-                                detection.ocrText = task.result?.text?.replace("\n", " ") ?: ""
-                            }
-                            detection
-                        }
-                } else {
+                if (detection.locked) {
+                    // Already locked - skip OCR, text is set above
                     Tasks.forResult(detection)
+                } else {
+                    val croppedBitmap = cropDetectionRegion(rotatedBitmap, detection.rect)
+                    if (croppedBitmap != null) {
+                        val inputImage = InputImage.fromBitmap(croppedBitmap, 0)
+                        recognizer.process(inputImage)
+                            .continueWith { task ->
+                                if (task.isSuccessful) {
+                                    detection.ocrText = task.result?.text?.replace("\n", " ") ?: ""
+                                }
+                                detection
+                            }
+                    } else {
+                        Tasks.forResult(detection)
+                    }
                 }
             }
 
             // Wait for all OCR tasks to complete
             Tasks.whenAllComplete(ocrTasks)
                 .addOnCompleteListener {
+                    // Auto-upload locked detections that haven't been uploaded
+                    autoUploadNewDetections(detections, rotatedBitmap)
+
                     // Combine all OCR text for the status display
                     val combinedText = detections
                         .filter { it.ocrText.isNotBlank() }

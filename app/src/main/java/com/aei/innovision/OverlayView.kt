@@ -6,23 +6,51 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.util.AttributeSet
+import android.view.MotionEvent
 import android.view.View
-import kotlin.math.roundToInt
 
 class OverlayView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
 ) : View(context, attrs) {
 
-    private val boxPaint = Paint().apply {
+    private val pendingBoxPaint = Paint().apply {
         style = Paint.Style.STROKE
         strokeWidth = 6f
         color = Color.YELLOW
         isAntiAlias = true
     }
 
+    private val lockedBoxPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 6f
+        color = Color.CYAN
+        isAntiAlias = true
+    }
+
+    private val storedBoxPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 6f
+        color = Color.GREEN
+        isAntiAlias = true
+    }
+
     private val textPaint = Paint().apply {
         color = Color.WHITE
+        textSize = 32f
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+
+    private val lockedTextPaint = Paint().apply {
+        color = Color.CYAN
+        textSize = 32f
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+
+    private val storedTextPaint = Paint().apply {
+        color = Color.GREEN
         textSize = 32f
         style = Paint.Style.FILL
         isAntiAlias = true
@@ -37,6 +65,9 @@ class OverlayView @JvmOverloads constructor(
     private var imageWidth: Int = 0
     private var imageHeight: Int = 0
 
+    // Callback when a detection box is tapped
+    var onDetectionTapped: ((PostItDetector.Detection) -> Unit)? = null
+
     fun setDetections(
         detections: List<PostItDetector.Detection>,
         imageWidth: Int,
@@ -46,6 +77,34 @@ class OverlayView @JvmOverloads constructor(
         this.imageWidth = imageWidth
         this.imageHeight = imageHeight
         invalidate()
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.action != MotionEvent.ACTION_DOWN) return super.onTouchEvent(event)
+        if (imageWidth == 0 || imageHeight == 0) return super.onTouchEvent(event)
+
+        val scaleX = width / imageWidth.toFloat()
+        val scaleY = height / imageHeight.toFloat()
+        val touchX = event.x
+        val touchY = event.y
+
+        // Find which detection box was tapped
+        val tapped = detections.firstOrNull { det ->
+            val rect = RectF(
+                det.rect.left * scaleX,
+                det.rect.top * scaleY,
+                det.rect.right * scaleX,
+                det.rect.bottom * scaleY
+            )
+            rect.contains(touchX, touchY)
+        }
+
+        if (tapped != null) {
+            onDetectionTapped?.invoke(tapped)
+            return true
+        }
+
+        return super.onTouchEvent(event)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -65,18 +124,24 @@ class OverlayView @JvmOverloads constructor(
                 det.rect.bottom * scaleY
             )
 
-            // Draw bounding box
-            canvas.drawRect(rect, boxPaint)
+            // Draw bounding box: green=stored, cyan=locked, yellow=pending
+            val boxPaint = when {
+                det.uploaded -> storedBoxPaint
+                det.locked -> lockedBoxPaint
+                else -> pendingBoxPaint
+            }
 
-            // Compute center in IMAGE coordinates (important!)
-            val cx = ((det.rect.left + det.rect.right) / 2f).roundToInt()
-            val cy = ((det.rect.top + det.rect.bottom) / 2f).roundToInt()
+            canvas.drawRect(rect, boxPaint)
 
             val label = det.label
             val conf = String.format("%.2f", det.score)
+            val statusTag = when {
+                det.uploaded -> " [STORED]"
+                det.locked -> " [LOCKED]"
+                else -> ""
+            }
 
-            val line1 = "$label $conf"
-            val line2 = "x=$cx y=$cy"
+            val line1 = "$label $conf$statusTag"
             // Show OCR text if available (truncate if too long)
             val ocrText = if (det.ocrText.isNotBlank()) {
                 if (det.ocrText.length > 30) det.ocrText.take(30) + "..." else det.ocrText
@@ -84,11 +149,16 @@ class OverlayView @JvmOverloads constructor(
 
             val textPadding = 8f
             val lineHeight = textPaint.textSize + 6f
-            val numLines = if (ocrText.isNotBlank()) 3 else 2
+            val numLines = if (ocrText.isNotBlank()) 2 else 1
+
+            val labelPaint = when {
+                det.uploaded -> storedTextPaint
+                det.locked -> lockedTextPaint
+                else -> textPaint
+            }
 
             val textWidth = maxOf(
-                textPaint.measureText(line1),
-                textPaint.measureText(line2),
+                labelPaint.measureText(line1),
                 if (ocrText.isNotBlank()) textPaint.measureText(ocrText) else 0f
             )
 
@@ -102,19 +172,12 @@ class OverlayView @JvmOverloads constructor(
             // Background for readability
             canvas.drawRect(bgRect, bgPaint)
 
-            // Draw text
+            // Draw label line
             canvas.drawText(
                 line1,
                 bgRect.left + textPadding,
                 bgRect.top + lineHeight,
-                textPaint
-            )
-
-            canvas.drawText(
-                line2,
-                bgRect.left + textPadding,
-                bgRect.top + lineHeight * 2,
-                textPaint
+                labelPaint
             )
 
             // Draw OCR text if available
@@ -122,7 +185,7 @@ class OverlayView @JvmOverloads constructor(
                 canvas.drawText(
                     ocrText,
                     bgRect.left + textPadding,
-                    bgRect.top + lineHeight * 3,
+                    bgRect.top + lineHeight * 2,
                     textPaint
                 )
             }
