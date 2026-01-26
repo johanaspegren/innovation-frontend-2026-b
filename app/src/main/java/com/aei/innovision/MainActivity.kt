@@ -1,10 +1,16 @@
 package com.aei.innovision
 
 import android.Manifest
+import android.content.ComponentName
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.view.KeyEvent
 import android.widget.Toast
@@ -17,6 +23,7 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.aei.innovision.databinding.ActivityMainBinding
 import com.google.android.gms.tasks.Tasks
@@ -27,12 +34,13 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.max
 import kotlin.math.min
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var binding: ActivityMainBinding
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var yuvToRgbConverter: YuvToRgbConverter
@@ -46,20 +54,40 @@ class MainActivity : AppCompatActivity() {
     )
     private val apiService = PostItApiService()
 
-    // Track locked post-its: user tapped to confirm OCR text (trackId -> locked text)
+    // Voice Components
+    private lateinit var tts: TextToSpeech
+    private lateinit var speechRecognizer: SpeechRecognizer
+    private var isListening = false
+    private var lastAskedTrackId: Int? = null
+
+    // Simulated suggestions from backend
+    private val suggestedContents = listOf(
+        "Cool Stuff",
+        "MORE AI",
+        "Refinement",
+        "Sprint 2026",
+        "Idea Board",
+        "Innovation"
+    )
+
+    // Track locked post-its: user confirmed OCR text (trackId -> locked text)
     private val lockedPostIts = mutableMapOf<Int, String>()
+    
+    // Stabilize suggestions: trackId -> last matched suggestion
+    private val matchedSuggestions = mutableMapOf<Int, String>()
 
     // Track which post-its have been uploaded or are in-flight
     private val uploadedTrackIds = mutableSetOf<Int>()
     private val uploadingTrackIds = mutableSetOf<Int>()
 
     private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { isGranted ->
-        if (isGranted) {
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { permissions ->
+        if (permissions[Manifest.permission.CAMERA] == true) {
             startCamera()
-        } else {
-            binding.statusText.text = getString(R.string.camera_permission_required)
+        }
+        if (permissions[Manifest.permission.RECORD_AUDIO] == true) {
+            initSpeechRecognizer()
         }
     }
 
@@ -71,6 +99,7 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor = Executors.newSingleThreadExecutor()
         yuvToRgbConverter = YuvToRgbConverter(this)
         postItDetector = PostItDetector(this)
+        tts = TextToSpeech(this, this)
 
         // Tap on a detection box to lock its OCR text
         binding.overlayView.onDetectionTapped = { detection ->
@@ -79,32 +108,115 @@ class MainActivity : AppCompatActivity() {
 
         // Reset button: clears all locked/uploaded state
         binding.uploadButton.setOnClickListener {
-            lockedPostIts.clear()
-            uploadedTrackIds.clear()
-            uploadingTrackIds.clear()
-            Toast.makeText(this, "All states reset", Toast.LENGTH_SHORT).show()
+            resetAll()
         }
 
-        if (hasCameraPermission()) {
+        checkPermissions()
+    }
+
+    private fun checkPermissions() {
+        val permissions = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+        val toRequest = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (toRequest.isEmpty()) {
             startCamera()
+            initSpeechRecognizer()
         } else {
-            requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+            requestPermissionLauncher.launch(toRequest.toTypedArray())
         }
     }
 
+    private fun resetAll() {
+        lockedPostIts.clear()
+        uploadedTrackIds.clear()
+        uploadingTrackIds.clear()
+        matchedSuggestions.clear()
+        lastAskedTrackId = null
+        Toast.makeText(this, "All states reset", Toast.LENGTH_SHORT).show()
+    }
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            tts.language = Locale.US
+        }
+    }
+
+    private fun initSpeechRecognizer() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) return
+
+        // On some devices (like Pixel), the default SpeechRecognizer might point to an internal
+        // service (like SODA) that third-party apps are not allowed to bind to, causing a SecurityException.
+        // We explicitly target the standard Google Recognition Service to avoid this.
+        val googleServiceComponent = ComponentName(
+            "com.google.android.googlequicksearchbox",
+            "com.google.android.voicesearch.service.GoogleRecognitionService"
+        )
+
+        speechRecognizer = try {
+            SpeechRecognizer.createSpeechRecognizer(this, googleServiceComponent)
+        } catch (e: Exception) {
+            // Fallback to default if the explicit component is not found or fails
+            SpeechRecognizer.createSpeechRecognizer(this)
+        }
+
+        speechRecognizer.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) { isListening = true }
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() { isListening = false }
+            override fun onError(error: Int) { isListening = false }
+            override fun onResults(results: Bundle?) {
+                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (matches != null) {
+                    val text = matches[0].lowercase()
+                    if (text.contains("yes") || text.contains("save") || text.contains("confirm") || text.contains("correct")) {
+                        val focused = binding.overlayView.getFocusedDetection()
+                        if (focused != null && !focused.locked) {
+                            runOnUiThread { toggleLock(focused) }
+                            speak("Saved")
+                        }
+                    }
+                }
+                isListening = false
+            }
+            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+    }
+
+    private fun startListening() {
+        if (isListening || !::speechRecognizer.isInitialized) return
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+        }
+        speechRecognizer.startListening(intent)
+    }
+
+    private fun speak(text: String) {
+        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "innovision_tts")
+    }
+
     private fun toggleLock(detection: PostItDetector.Detection) {
+        // Stop assistant if it's currently speaking or listening
+        if (tts.isSpeaking) tts.stop()
+        if (isListening && ::speechRecognizer.isInitialized) {
+            speechRecognizer.stopListening()
+            isListening = false
+        }
+
         val trackId = detection.trackId
         if (trackId != null && detection.ocrText.isNotBlank()) {
             if (trackId in lockedPostIts) {
-                // Already locked - unlock it
                 lockedPostIts.remove(trackId)
                 Toast.makeText(this, "Unlocked post-it #$trackId", Toast.LENGTH_SHORT).show()
             } else {
                 lockedPostIts[trackId] = detection.ocrText
                 Toast.makeText(this, "Locked: \"${detection.ocrText}\"", Toast.LENGTH_SHORT).show()
             }
-        } else if (trackId != null && detection.ocrText.isBlank()) {
-            Toast.makeText(this, "No text detected yet - try again", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -119,11 +231,30 @@ class MainActivity : AppCompatActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
+    private fun processVoiceAssistant(detections: List<PostItDetector.Detection>) {
+        val focused = binding.overlayView.getFocusedDetection() ?: return
+        val trackId = focused.trackId ?: return
+        
+        if (focused.ocrText.isNotBlank() && !focused.locked && !focused.uploaded && trackId != lastAskedTrackId) {
+            if (matchedSuggestions.containsKey(trackId)) {
+                lastAskedTrackId = trackId
+                val suggestion = focused.ocrText
+                speak("Save $suggestion?")
+                
+                binding.root.postDelayed({
+                    // Only start listening if the user didn't manually lock it while we were talking
+                    if (lastAskedTrackId == trackId && !focused.locked) {
+                        startListening()
+                    }
+                }, 1500)
+            }
+        }
+    }
+
     private fun autoUploadNewDetections(
         detections: List<PostItDetector.Detection>,
         image: Bitmap
     ) {
-        // Only upload locked detections that haven't been uploaded yet
         val toUpload = detections.filter { det ->
             det.trackId != null &&
                 det.locked &&
@@ -134,22 +265,16 @@ class MainActivity : AppCompatActivity() {
 
         if (toUpload.isEmpty()) return
 
-        // Mark as in-flight
         val trackIds = toUpload.mapNotNull { it.trackId }.toSet()
         uploadingTrackIds.addAll(trackIds)
-
-        Log.d("MainActivity", "Auto-uploading ${toUpload.size} new post-its (trackIds: $trackIds)")
 
         apiService.uploadPostIts(toUpload, image) { result ->
             result.fold(
                 onSuccess = {
-                    Log.d("MainActivity", "Upload confirmed for trackIds: $trackIds")
                     uploadedTrackIds.addAll(trackIds)
                     uploadingTrackIds.removeAll(trackIds)
                 },
-                onFailure = { error ->
-                    Log.e("MainActivity", "Upload failed for trackIds: $trackIds", error)
-                    // Remove from in-flight so retry is possible on next frame
+                onFailure = {
                     uploadingTrackIds.removeAll(trackIds)
                 }
             )
@@ -160,13 +285,15 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         cameraExecutor.shutdown()
         postItDetector.close()
+        tts.stop()
+        tts.shutdown()
+        if (::speechRecognizer.isInitialized) {
+            speechRecognizer.destroy()
+        }
     }
 
     private fun hasCameraPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.CAMERA,
-        ) == PackageManager.PERMISSION_GRANTED
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun startCamera() {
@@ -184,24 +311,16 @@ class MainActivity : AppCompatActivity() {
                     .also {
                         it.setAnalyzer(cameraExecutor, PostItAnalyzer { text, detections, width, height ->
                             runOnUiThread {
-                                binding.statusText.text = if (text.isBlank()) {
-                                    getString(R.string.no_text_detected)
-                                } else {
-                                    text
-                                }
+                                binding.statusText.text = if (text.isBlank()) "Looking for post-its..." else text
                                 binding.overlayView.setDetections(detections, width, height)
+                                processVoiceAssistant(detections)
                             }
                         })
                     }
 
                 val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
                 cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
-                    this,
-                    cameraSelector,
-                    preview,
-                    imageAnalyzer,
-                )
+                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalyzer)
             },
             ContextCompat.getMainExecutor(this),
         )
@@ -214,21 +333,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun cropDetectionRegion(bitmap: Bitmap, rect: android.graphics.RectF): Bitmap? {
-        // Clamp coordinates to bitmap bounds
         val left = max(0, rect.left.toInt())
         val top = max(0, rect.top.toInt())
         val right = min(bitmap.width, rect.right.toInt())
         val bottom = min(bitmap.height, rect.bottom.toInt())
-
         val width = right - left
         val height = bottom - top
-
         if (width <= 0 || height <= 0) return null
-
         return try {
             Bitmap.createBitmap(bitmap, left, top, width, height)
         } catch (e: Exception) {
-            Log.e("MainActivity", "Failed to crop bitmap", e)
             null
         }
     }
@@ -247,40 +361,27 @@ class MainActivity : AppCompatActivity() {
             val bitmap = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
             yuvToRgbConverter.yuvToRgb(mediaImage, bitmap)
 
-            // Pass the rotation degrees to the detector
             val detections = postItDetector.detect(bitmap, rotationDegrees)
-
-            // Calculate rotated dimensions
             val isRotated90or270 = rotationDegrees == 90 || rotationDegrees == 270
             val displayWidth = if (isRotated90or270) bitmap.height else bitmap.width
             val displayHeight = if (isRotated90or270) bitmap.width else bitmap.height
 
             val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
 
-            // 1. Barcode Scanning for Server URL
             barcodeScanner.process(inputImage)
                 .addOnSuccessListener { barcodes ->
                     for (barcode in barcodes) {
                         val rawValue = barcode.rawValue
                         if (rawValue != null && (rawValue.startsWith("http://") || rawValue.startsWith("https://"))) {
-                            // Extract IP and Port from URL (simple parsing)
                             try {
                                 val url = java.net.URL(rawValue)
-                                if (PostItApiService.SERVER_IP != url.host || PostItApiService.SERVER_PORT != url.port) {
-                                    PostItApiService.SERVER_IP = url.host
-                                    PostItApiService.SERVER_PORT = if (url.port != -1) url.port else 80
-                                    runOnUiThread {
-                                        Toast.makeText(this@MainActivity, "Server set to: ${PostItApiService.serverUrl}", Toast.LENGTH_LONG).show()
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                Log.e("MainActivity", "Failed to parse URL from QR", e)
-                            }
+                                PostItApiService.SERVER_IP = url.host
+                                PostItApiService.SERVER_PORT = if (url.port != -1) url.port else 80
+                            } catch (e: Exception) {}
                         }
                     }
                 }
 
-            // Rotate bitmap for OCR
             val rotatedBitmap = rotateBitmap(bitmap, rotationDegrees)
 
             if (detections.isEmpty()) {
@@ -289,7 +390,6 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            // Apply locked/uploaded state
             detections.forEach { det ->
                 val trackId = det.trackId ?: return@forEach
                 if (trackId in lockedPostIts) {
@@ -301,7 +401,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Run OCR on detection regions
             val ocrTasks = detections.map { detection ->
                 if (detection.locked) {
                     Tasks.forResult(detection)
@@ -312,7 +411,22 @@ class MainActivity : AppCompatActivity() {
                         recognizer.process(cropImage)
                             .continueWith { task ->
                                 if (task.isSuccessful) {
-                                    detection.ocrText = task.result?.text?.replace("\n", " ") ?: ""
+                                    val rawOcr = task.result?.text?.replace("\n", " ") ?: ""
+                                    val bestMatch = FuzzyMatcher.findBestMatch(rawOcr, suggestedContents, 0.6f)
+                                    val trackId = detection.trackId
+                                    
+                                    if (bestMatch != null) {
+                                        val (suggestion, _) = bestMatch
+                                        detection.ocrText = suggestion
+                                        if (trackId != null) matchedSuggestions[trackId] = suggestion
+                                    } else {
+                                        val prevMatch = trackId?.let { matchedSuggestions[it] }
+                                        if (prevMatch != null && FuzzyMatcher.getSimilarity(rawOcr, prevMatch) > 0.35f) {
+                                            detection.ocrText = prevMatch
+                                        } else {
+                                            detection.ocrText = rawOcr
+                                        }
+                                    }
                                 }
                                 detection
                             }
@@ -325,10 +439,7 @@ class MainActivity : AppCompatActivity() {
             Tasks.whenAllComplete(ocrTasks)
                 .addOnCompleteListener {
                     autoUploadNewDetections(detections, rotatedBitmap)
-                    val combinedText = detections
-                        .filter { it.ocrText.isNotBlank() }
-                        .joinToString("\n") { it.ocrText }
-
+                    val combinedText = detections.filter { it.ocrText.isNotBlank() }.joinToString("\n") { it.ocrText }
                     onResult(combinedText, detections, displayWidth, displayHeight)
                     imageProxy.close()
                 }

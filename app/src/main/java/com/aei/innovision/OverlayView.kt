@@ -198,7 +198,7 @@ class OverlayView @JvmOverloads constructor(
                 else -> ""
             }
 
-            val line1 = "$label $conf$statusTag"
+            val line1 = "$conf$statusTag"
             // Show OCR text if available (truncate if too long)
             val ocrText = if (det.ocrText.isNotBlank()) {
                 if (det.ocrText.length > 30) det.ocrText.take(30) + "..." else det.ocrText
