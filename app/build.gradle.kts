@@ -53,6 +53,7 @@ dependencies {
     implementation("androidx.camera:camera-view:$cameraxVersion")
 
     implementation("com.google.mlkit:text-recognition:16.0.0")
+    implementation("com.google.mlkit:barcode-scanning:17.2.0")
     implementation("com.google.mlkit:digital-ink-recognition:18.1.0")
 
     // Use consistent TFLite versions

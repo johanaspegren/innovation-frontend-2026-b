@@ -19,6 +19,10 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import com.aei.innovision.databinding.ActivityMainBinding
 import com.google.android.gms.tasks.Tasks
+import com.google.mlkit.vision.barcode.BarcodeScanner
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -34,6 +38,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var postItDetector: PostItDetector
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private val barcodeScanner: BarcodeScanner = BarcodeScanning.getClient(
+        BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .build()
+    )
     private val apiService = PostItApiService()
 
     // Track locked post-its: user tapped to confirm OCR text (trackId -> locked text)
@@ -225,23 +234,46 @@ class MainActivity : AppCompatActivity() {
             // Pass the rotation degrees to the detector
             val detections = postItDetector.detect(bitmap, rotationDegrees)
 
-            // Calculate rotated dimensions - matches how PreviewView displays the image
-            // and how PostItDetector now returns coordinates (in rotated/display space)
+            // Calculate rotated dimensions
             val isRotated90or270 = rotationDegrees == 90 || rotationDegrees == 270
             val displayWidth = if (isRotated90or270) bitmap.height else bitmap.width
             val displayHeight = if (isRotated90or270) bitmap.width else bitmap.height
 
-            // Rotate bitmap to match detection coordinates (upright orientation)
+            val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
+
+            // 1. Barcode Scanning for Server URL
+            barcodeScanner.process(inputImage)
+                .addOnSuccessListener { barcodes ->
+                    for (barcode in barcodes) {
+                        val rawValue = barcode.rawValue
+                        if (rawValue != null && (rawValue.startsWith("http://") || rawValue.startsWith("https://"))) {
+                            // Extract IP and Port from URL (simple parsing)
+                            try {
+                                val url = java.net.URL(rawValue)
+                                if (PostItApiService.SERVER_IP != url.host || PostItApiService.SERVER_PORT != url.port) {
+                                    PostItApiService.SERVER_IP = url.host
+                                    PostItApiService.SERVER_PORT = if (url.port != -1) url.port else 80
+                                    runOnUiThread {
+                                        Toast.makeText(this@MainActivity, "Server set to: ${PostItApiService.serverUrl}", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.e("MainActivity", "Failed to parse URL from QR", e)
+                            }
+                        }
+                    }
+                }
+
+            // Rotate bitmap for OCR
             val rotatedBitmap = rotateBitmap(bitmap, rotationDegrees)
 
             if (detections.isEmpty()) {
-                // No detections - just report empty
                 onResult("", detections, displayWidth, displayHeight)
                 imageProxy.close()
                 return
             }
 
-            // Apply locked/uploaded state before OCR
+            // Apply locked/uploaded state
             detections.forEach { det ->
                 val trackId = det.trackId ?: return@forEach
                 if (trackId in lockedPostIts) {
@@ -253,16 +285,15 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Run OCR only on non-locked detected post-it regions
+            // Run OCR on detection regions
             val ocrTasks = detections.map { detection ->
                 if (detection.locked) {
-                    // Already locked - skip OCR, text is set above
                     Tasks.forResult(detection)
                 } else {
                     val croppedBitmap = cropDetectionRegion(rotatedBitmap, detection.rect)
                     if (croppedBitmap != null) {
-                        val inputImage = InputImage.fromBitmap(croppedBitmap, 0)
-                        recognizer.process(inputImage)
+                        val cropImage = InputImage.fromBitmap(croppedBitmap, 0)
+                        recognizer.process(cropImage)
                             .continueWith { task ->
                                 if (task.isSuccessful) {
                                     detection.ocrText = task.result?.text?.replace("\n", " ") ?: ""
@@ -275,13 +306,9 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // Wait for all OCR tasks to complete
             Tasks.whenAllComplete(ocrTasks)
                 .addOnCompleteListener {
-                    // Auto-upload locked detections that haven't been uploaded
                     autoUploadNewDetections(detections, rotatedBitmap)
-
-                    // Combine all OCR text for the status display
                     val combinedText = detections
                         .filter { it.ocrText.isNotBlank() }
                         .joinToString("\n") { it.ocrText }

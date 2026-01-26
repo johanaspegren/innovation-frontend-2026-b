@@ -65,7 +65,7 @@ class PostItDetector(context: Context) {
     private var nextTrackId = 1
     private val tracks = mutableListOf<Track>()
 
-    private val confThreshold = 0.10f          // raise for stability
+    private val confThreshold = 0.05f          // raise for stability
     private val nmsIouThreshold = 0.45f
 
     // Tracking params
