@@ -454,16 +454,26 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 isCapturingForStart = false
                 apiService.startSession(rotatedBitmap) { result ->
                     runOnUiThread {
-                        if (result.isSuccess) {
-                            Toast.makeText(this@MainActivity, "Session Started!", Toast.LENGTH_SHORT).show()
-                            binding.startButton.visibility = View.GONE
-                            isSessionActive = true
-                            apiService.startWebSocket()
-                        } else {
-                            binding.startButton.isEnabled = true
-                            binding.startButton.text = "START SESSION"
-                            Toast.makeText(this@MainActivity, "Capture failed, try again", Toast.LENGTH_SHORT).show()
-                        }
+                        result.fold(
+                            onSuccess = { response ->
+                                if (response.success && response.session_id != null) {
+                                    val sessionId = response.session_id
+                                    Toast.makeText(this@MainActivity, "Session Started! ID: $sessionId", Toast.LENGTH_LONG).show()
+                                    binding.startButton.visibility = View.GONE
+                                    isSessionActive = true
+                                    apiService.startWebSocket(sessionId)
+                                } else {
+                                    binding.startButton.isEnabled = true
+                                    binding.startButton.text = "START SESSION"
+                                    Toast.makeText(this@MainActivity, "Session failed: ${response.message ?: "Server reported failure"}", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            onFailure = { 
+                                binding.startButton.isEnabled = true
+                                binding.startButton.text = "START SESSION"
+                                Toast.makeText(this@MainActivity, "Capture failed, try again", Toast.LENGTH_SHORT).show()
+                            }
+                        )
                     }
                 }
             }

@@ -13,14 +13,18 @@ import java.util.concurrent.TimeUnit
 
 class PostItApiService {
 
+    // Store the active session ID
+    private var activeSessionId: String? = null
+
     companion object {
         private const val TAG = "PostItApiService"
         var SERVER_IP = "192.168.1.100"
         var SERVER_PORT = 8080
 
-        val serverUrl: String get() = "http://$SERVER_IP:$SERVER_PORT/api/postits"
-        val startSessionUrl: String get() = "http://$SERVER_IP:$SERVER_PORT/api/session/start"
-        val wsUrl: String get() = "ws://$SERVER_IP:$SERVER_PORT/ws"
+        val postItsUrl: String get() = "http://$SERVER_IP:$SERVER_PORT/api/postits"
+        val startSessionUrl: String get() = "http://$SERVER_IP:$SERVER_PORT/api/sessions/start"
+        // WebSocket URL will be constructed with the session ID dynamically
+        fun wsUrl(sessionId: String) = "ws://$SERVER_IP:$SERVER_PORT/ws/$sessionId"
     }
 
     private val client = OkHttpClient.Builder()
@@ -39,15 +43,19 @@ class PostItApiService {
 
     data class BoundsDto(val left: Float, val top: Float, val right: Float, val bottom: Float)
     data class PostItDto(val trackId: Int?, val text: String, val confidence: Float, val bounds: BoundsDto)
-    data class UploadRequest(val timestamp: Long, val postits: List<PostItDto>, val imageBase64: String? = null)
-    data class StartSessionRequest(val imageBase64: String)
-    data class UploadResponse(val success: Boolean, val message: String? = null)
+
+    // New request/response DTOs based on SPEC.md
+    data class StartSessionRequest(val timestamp: Long, val imageBase64: String)
+    data class StartSessionResponse(val success: Boolean, val session_id: String? = null, val message: String? = null)
     
-    // WebSocket Message Format
+    data class UploadRequest(val timestamp: Long, val session_id: String, val postits: List<PostItDto>)
+    data class UploadResponse(val success: Boolean, val message: String? = null, val id: String? = null)
+
+    // WebSocket Message Format - Remains largely the same
     data class WsMessage(val type: String, val data: List<String>? = null, val text: String? = null)
 
-    fun startSession(image: Bitmap, callback: (Result<UploadResponse>) -> Unit) {
-        val request = StartSessionRequest(bitmapToBase64(image))
+    fun startSession(image: Bitmap, callback: (Result<StartSessionResponse>) -> Unit) {
+        val request = StartSessionRequest(System.currentTimeMillis(), bitmapToBase64(image))
         val httpRequest = Request.Builder()
             .url(startSessionUrl)
             .post(gson.toJson(request).toRequestBody("application/json".toMediaType()))
@@ -59,9 +67,12 @@ class PostItApiService {
                 response.use {
                     if (response.isSuccessful) {
                         val body = response.body?.string()
-                        callback(Result.success(gson.fromJson(body, UploadResponse::class.java)))
+                        val result = gson.fromJson(body, StartSessionResponse::class.java)
+                        // Store session ID upon successful start
+                        activeSessionId = result.session_id
+                        callback(Result.success(result))
                     } else {
-                        callback(Result.failure(IOException("Code ${response.code}")))
+                        callback(Result.failure(IOException("Start session failed: Code ${response.code}")))
                     }
                 }
             }
@@ -69,6 +80,12 @@ class PostItApiService {
     }
 
     fun uploadPostIts(detections: List<PostItDetector.Detection>, image: Bitmap? = null, callback: (Result<UploadResponse>) -> Unit) {
+        val sessionId = activeSessionId
+        if (sessionId == null) {
+            callback(Result.failure(IllegalStateException("Cannot upload post-its. Session ID is missing.")))
+            return
+        }
+
         val postItDtos = detections.map { detection ->
             PostItDto(
                 trackId = detection.trackId,
@@ -77,10 +94,11 @@ class PostItApiService {
                 bounds = BoundsDto(detection.rect.left, detection.rect.top, detection.rect.right, detection.rect.bottom)
             )
         }
-
-        val request = UploadRequest(System.currentTimeMillis(), postItDtos, image?.let { bitmapToBase64(it) })
+        
+        // Remove imageBase64 from UploadRequest as per new spec
+        val request = UploadRequest(System.currentTimeMillis(), sessionId, postItDtos)
         val httpRequest = Request.Builder()
-            .url(serverUrl)
+            .url(postItsUrl)
             .post(gson.toJson(request).toRequestBody("application/json".toMediaType()))
             .build()
 
@@ -89,18 +107,22 @@ class PostItApiService {
             override fun onResponse(call: Call, response: Response) {
                 response.use {
                     if (response.isSuccessful) callback(Result.success(gson.fromJson(response.body?.string(), UploadResponse::class.java)))
-                    else callback(Result.failure(IOException("Code ${response.code}")))
+                    else callback(Result.failure(IOException("Upload post-its failed: Code ${response.code}")))
                 }
             }
         })
     }
 
-    fun startWebSocket() {
-        Log.d(TAG, "Connecting to WebSocket: $wsUrl")
-        val request = Request.Builder().url(wsUrl).build()
+    fun startWebSocket(sessionId: String) {
+        stopWebSocket() // Close any existing connection first
+        activeSessionId = sessionId
+        val url = wsUrl(sessionId)
+        Log.d(TAG, "Connecting to WebSocket: $url")
+        val request = Request.Builder().url(url).build()
+        
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "WebSocket Connected")
+                Log.d(TAG, "WebSocket Connected to session $sessionId")
                 onConnectionStatusChanged?.invoke(true)
             }
 
@@ -111,6 +133,9 @@ class PostItApiService {
                     when (msg.type) {
                         "suggestions" -> msg.data?.let { onSuggestionsReceived?.invoke(it) }
                         "speech" -> msg.text?.let { onSpeechRequested?.invoke(it) }
+                        "connected" -> Log.d(TAG, "WS Handshake: ${msg.text}")
+                        "error" -> Log.e(TAG, "WS Error: ${msg.text}")
+                        // Ignore "postits_received" and "graph_updated" events for Android app
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to parse WS message", e)
@@ -118,16 +143,20 @@ class PostItApiService {
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                Log.d(TAG, "WebSocket Closing: $code / $reason")
                 onConnectionStatusChanged?.invoke(false)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "WebSocket Error", t)
                 onConnectionStatusChanged?.invoke(false)
-                // Reconnect after 5 seconds
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    startWebSocket()
-                }, 5000)
+                // Reconnect only if we have an active session ID
+                if (activeSessionId != null) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        // Attempt to reconnect to the stored session
+                        startWebSocket(activeSessionId!!) 
+                    }, 5000)
+                }
             }
         })
     }
@@ -135,10 +164,12 @@ class PostItApiService {
     fun stopWebSocket() {
         webSocket?.close(1000, "App closing")
         webSocket = null
+        activeSessionId = null
     }
 
     private fun bitmapToBase64(bitmap: Bitmap): String {
         val out = ByteArrayOutputStream()
+        // Use 80% compression for smaller size
         bitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
         return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }
