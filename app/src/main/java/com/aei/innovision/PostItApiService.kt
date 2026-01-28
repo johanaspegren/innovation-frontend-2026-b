@@ -19,6 +19,7 @@ class PostItApiService {
         var SERVER_PORT = 8080
 
         val serverUrl: String get() = "http://$SERVER_IP:$SERVER_PORT/api/postits"
+        val startSessionUrl: String get() = "http://$SERVER_IP:$SERVER_PORT/api/session/start"
         val wsUrl: String get() = "ws://$SERVER_IP:$SERVER_PORT/ws"
     }
 
@@ -39,10 +40,33 @@ class PostItApiService {
     data class BoundsDto(val left: Float, val top: Float, val right: Float, val bottom: Float)
     data class PostItDto(val trackId: Int?, val text: String, val confidence: Float, val bounds: BoundsDto)
     data class UploadRequest(val timestamp: Long, val postits: List<PostItDto>, val imageBase64: String? = null)
+    data class StartSessionRequest(val imageBase64: String)
     data class UploadResponse(val success: Boolean, val message: String? = null)
     
     // WebSocket Message Format
     data class WsMessage(val type: String, val data: List<String>? = null, val text: String? = null)
+
+    fun startSession(image: Bitmap, callback: (Result<UploadResponse>) -> Unit) {
+        val request = StartSessionRequest(bitmapToBase64(image))
+        val httpRequest = Request.Builder()
+            .url(startSessionUrl)
+            .post(gson.toJson(request).toRequestBody("application/json".toMediaType()))
+            .build()
+
+        client.newCall(httpRequest).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) { callback(Result.failure(e)) }
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    if (response.isSuccessful) {
+                        val body = response.body?.string()
+                        callback(Result.success(gson.fromJson(body, UploadResponse::class.java)))
+                    } else {
+                        callback(Result.failure(IOException("Code ${response.code}")))
+                    }
+                }
+            }
+        })
+    }
 
     fun uploadPostIts(detections: List<PostItDetector.Detection>, image: Bitmap? = null, callback: (Result<UploadResponse>) -> Unit) {
         val postItDtos = detections.map { detection ->

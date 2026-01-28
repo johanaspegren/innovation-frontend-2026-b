@@ -60,8 +60,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var isListening = false
     private var lastAskedTrackId: Int? = null
 
-    // Capture state
+    // Session state
+    private var isSessionActive = false
     private var isCapturingForStart = false
+    private var isServerFound = false
 
     // Suggestions from backend (initialized with defaults)
     private var suggestedContents = mutableListOf(
@@ -129,6 +131,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun initWebSocket() {
         apiService.onConnectionStatusChanged = { connected ->
             runOnUiThread {
+                binding.connectionStatusIcon.setImageResource(
+                    if (connected) android.R.drawable.presence_online 
+                    else android.R.drawable.presence_offline
+                )
                 binding.statusText.text = if (connected) "Connected to Backend" else "Backend Offline"
             }
         }
@@ -146,8 +152,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 speak(text, "backend_request")
             }
         }
-
-        apiService.startWebSocket()
     }
 
     private fun checkPermissions() {
@@ -170,9 +174,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         uploadingTrackIds.clear()
         matchedSuggestions.clear()
         lastAskedTrackId = null
+        isSessionActive = false
+        isServerFound = false
         binding.startButton.visibility = View.VISIBLE
         binding.startButton.isEnabled = true
         binding.startButton.text = "START SESSION"
+        apiService.stopWebSocket()
         Toast.makeText(this, "All states reset", Toast.LENGTH_SHORT).show()
     }
 
@@ -386,21 +393,72 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private inner class PostItAnalyzer(
         private val onResult: (String, List<PostItDetector.Detection>, Int, Int) -> Unit,
     ) : ImageAnalysis.Analyzer {
+        private var lastQrScanTime = 0L
+
         @OptIn(ExperimentalGetImage::class) override fun analyze(imageProxy: ImageProxy) {
             val mediaImage = imageProxy.image ?: run { imageProxy.close(); return }
             val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+            
+            // 1. QR Scanning - Only if server not yet found
+            if (!isServerFound) {
+                val now = System.currentTimeMillis()
+                if (now - lastQrScanTime > 1000) { // Scan once per second
+                    lastQrScanTime = now
+                    Log.d(TAG, "Scanning for QR/Server IP...")
+                    val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
+                    barcodeScanner.process(inputImage)
+                        .addOnSuccessListener { barcodes ->
+                            for (barcode in barcodes) {
+                                val rawValue = barcode.rawValue
+                                Log.i(TAG, "QR Code Detected: $rawValue")
+                                if (rawValue != null && (rawValue.startsWith("http://") || rawValue.startsWith("https://"))) {
+                                    try {
+                                        val url = java.net.URL(rawValue)
+                                        PostItApiService.SERVER_IP = url.host
+                                        PostItApiService.SERVER_PORT = if (url.port != -1) url.port else 80
+                                        isServerFound = true
+                                        runOnUiThread {
+                                            Toast.makeText(this@MainActivity, "Server Connected: ${PostItApiService.SERVER_IP}", Toast.LENGTH_LONG).show()
+                                            binding.statusText.text = "Server: ${PostItApiService.SERVER_IP}"
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Invalid URL in QR: $rawValue")
+                                    }
+                                }
+                            }
+                        }
+                        .addOnCompleteListener {
+                            imageProxy.close()
+                        }
+                    return 
+                } else {
+                    imageProxy.close()
+                    return
+                }
+            }
+
+            // 2. Skip expensive processing if session not active and no capture requested
+            if (!isSessionActive && !isCapturingForStart) {
+                onResult("", emptyList(), imageProxy.width, imageProxy.height)
+                imageProxy.close()
+                return
+            }
+
+            // 3. Perform expensive YUV->RGB conversion ONLY when needed
             val bitmap = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
             yuvToRgbConverter.yuvToRgb(mediaImage, bitmap)
-            
             val rotatedBitmap = rotateBitmap(bitmap, rotationDegrees)
             
+            // Capture for start session
             if (isCapturingForStart) {
                 isCapturingForStart = false
-                apiService.uploadPostIts(emptyList(), rotatedBitmap) { result ->
+                apiService.startSession(rotatedBitmap) { result ->
                     runOnUiThread {
                         if (result.isSuccess) {
                             Toast.makeText(this@MainActivity, "Session Started!", Toast.LENGTH_SHORT).show()
                             binding.startButton.visibility = View.GONE
+                            isSessionActive = true
+                            apiService.startWebSocket()
                         } else {
                             binding.startButton.isEnabled = true
                             binding.startButton.text = "START SESSION"
@@ -410,24 +468,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
             }
 
+            // Hold detection until session is active
+            if (!isSessionActive) {
+                onResult("", emptyList(), rotatedBitmap.width, rotatedBitmap.height)
+                imageProxy.close()
+                return
+            }
+
             val detections = postItDetector.detect(bitmap, rotationDegrees)
             val isRotated90or270 = rotationDegrees == 90 || rotationDegrees == 270
             val displayWidth = if (isRotated90or270) bitmap.height else bitmap.width
             val displayHeight = if (isRotated90or270) bitmap.width else bitmap.height
-
-            val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
-            barcodeScanner.process(inputImage).addOnSuccessListener { barcodes ->
-                for (barcode in barcodes) {
-                    val rawValue = barcode.rawValue
-                    if (rawValue != null && (rawValue.startsWith("http://") || rawValue.startsWith("https://"))) {
-                        try {
-                            val url = java.net.URL(rawValue)
-                            PostItApiService.SERVER_IP = url.host
-                            PostItApiService.SERVER_PORT = if (url.port != -1) url.port else 80
-                        } catch (e: Exception) {}
-                    }
-                }
-            }
 
             if (detections.isEmpty()) {
                 onResult("", detections, displayWidth, displayHeight)
