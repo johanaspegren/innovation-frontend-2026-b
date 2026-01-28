@@ -105,7 +105,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         binding.uploadButton.setOnClickListener {
-            resetAll()
+            captureSceneAndStartSession()
         }
 
         initWebSocket()
@@ -134,7 +134,46 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         }
 
-        apiService.startWebSocket()
+        apiService.onPostitsReceived = { count, texts ->
+            Log.d(TAG, "Backend confirmed $count post-its received: $texts")
+        }
+
+        apiService.onGraphUpdated = { graphData ->
+            Log.d(TAG, "Graph updated from backend: $graphData")
+        }
+
+        // WebSocket connects after session is started (see startSessionWithImage)
+    }
+
+    /**
+     * Starts a backend session by sending a scene image to POST /api/sessions/start.
+     * On success, connects the WebSocket to /ws/{session_id} so we receive
+     * suggestions, speech, and graph updates.
+     */
+    fun startSessionWithImage(sceneImage: Bitmap) {
+        Log.d(TAG, "Starting session with scene image...")
+        runOnUiThread { binding.statusText.text = "Starting session..." }
+
+        apiService.startSession(sceneImage) { result ->
+            result.fold(
+                onSuccess = { resp ->
+                    Log.d(TAG, "Session started: ${resp.session_id} - ${resp.message}")
+                    runOnUiThread {
+                        binding.statusText.text = "Session active"
+                        Toast.makeText(this, "Session started", Toast.LENGTH_SHORT).show()
+                    }
+                    // Now connect WebSocket with the session ID
+                    apiService.startWebSocket()
+                },
+                onFailure = { e ->
+                    Log.e(TAG, "Failed to start session", e)
+                    runOnUiThread {
+                        binding.statusText.text = "Session start failed"
+                        Toast.makeText(this, "Session start failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            )
+        }
     }
 
     private fun checkPermissions() {
@@ -157,7 +196,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         uploadingTrackIds.clear()
         matchedSuggestions.clear()
         lastAskedTrackId = null
+        apiService.stopWebSocket()
         Toast.makeText(this, "All states reset", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Captures the latest camera frame and uses it to start a new backend session. */
+    private var pendingSceneCapture = false
+
+    private fun captureSceneAndStartSession() {
+        pendingSceneCapture = true
+        Toast.makeText(this, "Capturing scene for session...", Toast.LENGTH_SHORT).show()
     }
 
     override fun onInit(status: Int) {
@@ -394,7 +442,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         it.setAnalyzer(cameraExecutor, PostItAnalyzer { text, detections, width, height ->
                             runOnUiThread {
                                 val currentStatus = binding.statusText.text.toString()
-                                val voiceStates = listOf("Heard", "Listening...", "Recording...", "Processing...", "Voice Error", "Mic starting...", "Connected to Backend", "Backend Offline")
+                                val voiceStates = listOf("Heard", "Listening...", "Recording...", "Processing...", "Voice Error", "Mic starting...", "Connected to Backend", "Backend Offline", "Starting session...", "Session active", "Session start failed")
                                 if (voiceStates.any { currentStatus.startsWith(it) }) {
                                     // Keep important status
                                 } else {
@@ -471,6 +519,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
 
             val rotatedBitmap = rotateBitmap(bitmap, rotationDegrees)
+
+            // If a scene capture was requested, send this frame to start a session
+            if (pendingSceneCapture) {
+                pendingSceneCapture = false
+                startSessionWithImage(rotatedBitmap)
+            }
 
             if (detections.isEmpty()) {
                 onResult("", detections, displayWidth, displayHeight)
