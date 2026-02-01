@@ -87,6 +87,9 @@ class OverlayView @JvmOverloads constructor(
     private var detections: List<PostItDetector.Detection> = emptyList()
     private var imageWidth: Int = 0
     private var imageHeight: Int = 0
+    private var scaleFactor: Float = 1f
+    private var offsetX: Float = 0f
+    private var offsetY: Float = 0f
 
     // The detection currently in the center of the view
     private var focusedDetection: PostItDetector.Detection? = null
@@ -102,8 +105,23 @@ class OverlayView @JvmOverloads constructor(
         this.detections = detections
         this.imageWidth = imageWidth
         this.imageHeight = imageHeight
+        updateTransform()
         updateFocusedDetection()
         invalidate()
+    }
+
+    private fun updateTransform() {
+        if (imageWidth == 0 || imageHeight == 0 || width == 0 || height == 0) {
+            scaleFactor = 1f
+            offsetX = 0f
+            offsetY = 0f
+            return
+        }
+        val scaleX = width / imageWidth.toFloat()
+        val scaleY = height / imageHeight.toFloat()
+        scaleFactor = maxOf(scaleX, scaleY)
+        offsetX = (width - imageWidth * scaleFactor) / 2f
+        offsetY = (height - imageHeight * scaleFactor) / 2f
     }
 
     private fun updateFocusedDetection() {
@@ -127,22 +145,26 @@ class OverlayView @JvmOverloads constructor(
 
     fun getFocusedDetection(): PostItDetector.Detection? = focusedDetection
 
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        updateTransform()
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (event.action != MotionEvent.ACTION_DOWN) return super.onTouchEvent(event)
         if (imageWidth == 0 || imageHeight == 0) return super.onTouchEvent(event)
 
-        val scaleX = width / imageWidth.toFloat()
-        val scaleY = height / imageHeight.toFloat()
+        updateTransform()
         val touchX = event.x
         val touchY = event.y
 
         // Find which detection box was tapped
         val tapped = detections.firstOrNull { det ->
             val rect = RectF(
-                det.rect.left * scaleX,
-                det.rect.top * scaleY,
-                det.rect.right * scaleX,
-                det.rect.bottom * scaleY
+                det.rect.left * scaleFactor + offsetX,
+                det.rect.top * scaleFactor + offsetY,
+                det.rect.right * scaleFactor + offsetX,
+                det.rect.bottom * scaleFactor + offsetY
             )
             rect.contains(touchX, touchY)
         }
@@ -159,8 +181,7 @@ class OverlayView @JvmOverloads constructor(
         super.onDraw(canvas)
         if (imageWidth == 0 || imageHeight == 0) return
 
-        val scaleX = width / imageWidth.toFloat()
-        val scaleY = height / imageHeight.toFloat()
+        updateTransform()
 
         // Draw a subtle small reticle in the center for Glass users
         val viewCenterX = width / 2f
@@ -173,10 +194,10 @@ class OverlayView @JvmOverloads constructor(
 
             // Scale rect to view coordinates
             val rect = RectF(
-                det.rect.left * scaleX,
-                det.rect.top * scaleY,
-                det.rect.right * scaleX,
-                det.rect.bottom * scaleY
+                det.rect.left * scaleFactor + offsetX,
+                det.rect.top * scaleFactor + offsetY,
+                det.rect.right * scaleFactor + offsetX,
+                det.rect.bottom * scaleFactor + offsetY
             )
 
             // Draw bounding box: focus=blue, green=stored, cyan=locked, yellow=pending

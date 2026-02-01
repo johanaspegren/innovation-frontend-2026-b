@@ -65,14 +65,15 @@ class PostItDetector(context: Context) {
     private var nextTrackId = 1
     private val tracks = mutableListOf<Track>()
 
-    private val confThreshold = 0.05f          // raise for stability
+    private val confThreshold = 0.08f          // raise for stability
     private val nmsIouThreshold = 0.45f
 
     // Tracking params
-    private val matchIouThreshold = 0.30f      // how strict matching is
-    private val maxMissedFrames = 6            // keep track alive this many frames
-    private val maxTracks = 30                 // sanity cap
+    private val matchIouThreshold = 0.20f      // how strict matching is
+    private val maxMissedFrames = 3            // keep track alive this many frames
+    private val maxTracks = 20                 // sanity cap
     private val alpha = 0.65f                  // EMA weight for new box (higher = snappier, lower = smoother)
+    private val boxPaddingRatio = 0.08f        // expand boxes slightly to better cover post-its
 
     init {
         val model: MappedByteBuffer = FileUtil.loadMappedFile(context, "best_float16.tflite")
@@ -199,12 +200,16 @@ class PostItDetector(context: Context) {
             val right = x + boxW / 2f
             val bottom = y + boxH / 2f
 
+            // Expand box slightly to better cover post-its
+            val paddingX = boxW * boxPaddingRatio
+            val paddingY = boxH * boxPaddingRatio
+
             // Clamp to rotated bitmap bounds
             val clamped = RectF(
-                left.coerceIn(0f, rotatedBitmap.width.toFloat()),
-                top.coerceIn(0f, rotatedBitmap.height.toFloat()),
-                right.coerceIn(0f, rotatedBitmap.width.toFloat()),
-                bottom.coerceIn(0f, rotatedBitmap.height.toFloat())
+                (left - paddingX).coerceIn(0f, rotatedBitmap.width.toFloat()),
+                (top - paddingY).coerceIn(0f, rotatedBitmap.height.toFloat()),
+                (right + paddingX).coerceIn(0f, rotatedBitmap.width.toFloat()),
+                (bottom + paddingY).coerceIn(0f, rotatedBitmap.height.toFloat())
             )
 
             detections.add(

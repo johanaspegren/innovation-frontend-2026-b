@@ -4,55 +4,81 @@ import kotlin.math.min
 
 object FuzzyMatcher {
 
-    /**
-     * Calculates the Levenshtein distance between two strings.
-     * The distance is the number of insertions, deletions, or substitutions 
-     * required to change one string into another.
-     */
+    // ---------- helpers ----------
+
+    private fun normalize(s: String): String =
+        s.lowercase()
+            .replace(Regex("[^a-z0-9 ]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+    private fun tokens(s: String): Set<String> =
+        normalize(s).split(" ").filter { it.length > 1 }.toSet()
+
+    private fun ngrams(s: String, n: Int = 3): Set<String> {
+        val clean = normalize(s)
+        if (clean.length < n) return emptySet()
+        return (0..clean.length - n).map { clean.substring(it, it + n) }.toSet()
+    }
+
+    private fun jaccard(a: Set<String>, b: Set<String>): Float {
+        if (a.isEmpty() && b.isEmpty()) return 1f
+        if (a.isEmpty() || b.isEmpty()) return 0f
+        return (a intersect b).size.toFloat() / (a union b).size.toFloat()
+    }
+
+    // ---------- existing API (unchanged) ----------
+
     fun levenshteinDistance(s1: String, s2: String): Int {
-        val str1 = s1.lowercase().trim()
-        val str2 = s2.lowercase().trim()
-        
+        val str1 = normalize(s1)
+        val str2 = normalize(s2)
         val dp = Array(str1.length + 1) { IntArray(str2.length + 1) }
 
         for (i in 0..str1.length) {
             for (j in 0..str2.length) {
-                when {
-                    i == 0 -> dp[i][j] = j
-                    j == 0 -> dp[i][j] = i
-                    else -> {
-                        dp[i][j] = min(
-                            min(dp[i - 1][j] + 1, dp[i][j - 1] + 1),
-                            dp[i - 1][j - 1] + if (str1[i - 1] == str2[j - 1]) 0 else 1
-                        )
-                    }
+                dp[i][j] = when {
+                    i == 0 -> j
+                    j == 0 -> i
+                    else -> minOf(
+                        dp[i - 1][j] + 1,
+                        dp[i][j - 1] + 1,
+                        dp[i - 1][j - 1] + if (str1[i - 1] == str2[j - 1]) 0 else 1
+                    )
                 }
             }
         }
         return dp[str1.length][str2.length]
     }
 
-    /**
-     * Returns a similarity score between 0.0 and 1.0.
-     * 1.0 means an exact match, 0.0 means completely different.
-     */
     fun getSimilarity(s1: String, s2: String): Float {
-        if (s1.isEmpty() && s2.isEmpty()) return 1.0f
-        if (s1.isEmpty() || s2.isEmpty()) return 0.0f
-        
+        if (s1.isBlank() && s2.isBlank()) return 1f
+        if (s1.isBlank() || s2.isBlank()) return 0f
         val maxLength = maxOf(s1.length, s2.length)
         val distance = levenshteinDistance(s1, s2)
-        return (maxLength - distance).toFloat() / maxLength.toFloat()
+        return (maxLength - distance).toFloat() / maxLength
     }
 
-    /**
-     * Finds the best match from a list of suggestions.
-     * Returns a Pair of (Suggested String, Similarity Score) or null if no good match.
-     */
-    fun findBestMatch(input: String, suggestions: List<String>, threshold: Float = 0.6f): Pair<String, Float>? {
+    private fun combinedScore(a: String, b: String): Float {
+        val tokenScore = jaccard(tokens(a), tokens(b))
+        val ngramScore = jaccard(ngrams(a), ngrams(b))
+        val levenshteinScore = getSimilarity(a, b)
+
+        return (
+                0.4f * tokenScore +
+                        0.4f * ngramScore +
+                        0.2f * levenshteinScore
+                )
+    }
+
+    fun findBestMatch(
+        input: String,
+        suggestions: List<String>,
+        threshold: Float = 0.6f
+    ): Pair<String, Float>? {
         if (input.isBlank()) return null
-        
-        return suggestions.map { it to getSimilarity(input, it) }
+
+        return suggestions
+            .map { it to combinedScore(input, it) }
             .filter { it.second >= threshold }
             .maxByOrNull { it.second }
     }

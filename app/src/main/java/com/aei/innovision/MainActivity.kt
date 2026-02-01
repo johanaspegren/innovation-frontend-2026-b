@@ -40,6 +40,10 @@ import java.util.concurrent.Executors
 import kotlin.math.max
 import kotlin.math.min
 
+
+private const val STRONG_MATCH = 0.78f
+private const val STICKY_FLOOR = 0.40f
+
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var binding: ActivityMainBinding
     private lateinit var cameraExecutor: ExecutorService
@@ -515,18 +519,32 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                             .continueWith { task ->
                                 if (task.isSuccessful) {
                                     val rawOcr = task.result?.text?.replace("\n", " ") ?: ""
-                                    val bestMatch = FuzzyMatcher.findBestMatch(rawOcr, suggestedContents, 0.6f)
-                                    if (bestMatch != null) {
-                                        detection.ocrText = bestMatch.first
-                                        detection.trackId?.let { matchedSuggestions[it] = bestMatch.first }
-                                    } else {
-                                        val prevMatch = detection.trackId?.let { matchedSuggestions[it] }
-                                        if (prevMatch != null && FuzzyMatcher.getSimilarity(rawOcr, prevMatch) > 0.35f) {
-                                            detection.ocrText = prevMatch
-                                        } else {
+
+                                    val trackId = detection.trackId ?: return@continueWith detection
+                                    val previous = matchedSuggestions[trackId]
+
+                                    val best = FuzzyMatcher.findBestMatch(rawOcr, suggestedContents, 0.6f)
+
+                                    when {
+                                        // 1. Strong new match → override & stick
+                                        best != null && best.second >= STRONG_MATCH -> {
+                                            detection.ocrText = best.first
+                                            matchedSuggestions[trackId] = best.first
+                                        }
+
+                                        // 2. Weak OCR but previous match still plausible → stay sticky
+                                        previous != null && FuzzyMatcher.getSimilarity(rawOcr, previous) >= STICKY_FLOOR -> {
+                                            detection.ocrText = previous
+                                        }
+
+                                        // 3. Otherwise show raw OCR
+                                        else -> {
                                             detection.ocrText = rawOcr
+                                            matchedSuggestions.remove(trackId)
                                         }
                                     }
+
+
                                 }
                                 detection
                             }
