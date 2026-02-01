@@ -68,9 +68,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var isSessionActive = false
     private var isCapturingForStart = false
     private var isServerFound = false
+    private var hasReceivedSuggestions = false
 
     // Suggestions from backend (initialized with defaults)
-    private var suggestedContents = mutableListOf(
+    @Volatile
+    private var suggestedContents: List<String> = listOf(
         "Cool Stuff",
         "MORE AI",
         "Refinement",
@@ -146,8 +148,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         apiService.onSuggestionsReceived = { newSuggestions ->
             runOnUiThread {
-                suggestedContents.clear()
-                suggestedContents.addAll(newSuggestions)
+                suggestedContents = newSuggestions.toList()
+                matchedSuggestions.clear()
+                if (!hasReceivedSuggestions) {
+                    hasReceivedSuggestions = true
+                    Toast.makeText(this, "Suggestions updated from backend", Toast.LENGTH_SHORT).show()
+                }
                 Log.d(TAG, "Updated suggestions: $newSuggestions")
             }
         }
@@ -533,15 +539,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                                     val trackId = detection.trackId ?: return@continueWith detection
                                     val previous = matchedSuggestions[trackId]
 
-                                    val best = FuzzyMatcher.findBestMatch(rawOcr, suggestedContents, 0.6f)
-                                    val bestCandidate = FuzzyMatcher.findBestCandidate(rawOcr, suggestedContents)
+                                    val suggestionsSnapshot = suggestedContents
+                                    val best = FuzzyMatcher.findBestMatch(rawOcr, suggestionsSnapshot, 0.6f)
+                                    val bestCandidate = FuzzyMatcher.findBestCandidate(rawOcr, suggestionsSnapshot)
                                     val bestScore = best?.second ?: 0f
                                     val candidateScore = bestCandidate?.second ?: 0f
                                     val previousScore = if (previous != null) FuzzyMatcher.getSimilarity(rawOcr, previous) else 0f
 
                                     Log.d(
                                         TAG,
-                                        "OCR track=$trackId raw='$rawOcr' best='${best?.first ?: ""}' score=$bestScore candidate='${bestCandidate?.first ?: ""}' candidateScore=$candidateScore prev='${previous ?: ""}' prevScore=$previousScore suggestions=${suggestedContents.size}"
+                                        "OCR track=$trackId raw='$rawOcr' best='${best?.first ?: ""}' score=$bestScore candidate='${bestCandidate?.first ?: ""}' candidateScore=$candidateScore prev='${previous ?: ""}' prevScore=$previousScore suggestions=${suggestionsSnapshot.size}"
                                     )
 
                                     when {
