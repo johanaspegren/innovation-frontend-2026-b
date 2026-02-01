@@ -534,12 +534,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                                     val previous = matchedSuggestions[trackId]
 
                                     val best = FuzzyMatcher.findBestMatch(rawOcr, suggestedContents, 0.6f)
+                                    val bestCandidate = FuzzyMatcher.findBestCandidate(rawOcr, suggestedContents)
                                     val bestScore = best?.second ?: 0f
+                                    val candidateScore = bestCandidate?.second ?: 0f
                                     val previousScore = if (previous != null) FuzzyMatcher.getSimilarity(rawOcr, previous) else 0f
 
                                     Log.d(
                                         TAG,
-                                        "OCR track=$trackId raw='$rawOcr' best='${best?.first ?: ""}' score=$bestScore prev='${previous ?: ""}' prevScore=$previousScore"
+                                        "OCR track=$trackId raw='$rawOcr' best='${best?.first ?: ""}' score=$bestScore candidate='${bestCandidate?.first ?: ""}' candidateScore=$candidateScore prev='${previous ?: ""}' prevScore=$previousScore suggestions=${suggestedContents.size}"
                                     )
 
                                     when {
