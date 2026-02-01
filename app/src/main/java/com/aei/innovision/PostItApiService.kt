@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import android.util.Base64
 import android.util.Log
 import com.google.gson.Gson
+import com.google.gson.JsonElement
+import com.google.gson.JsonObject
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -129,12 +131,20 @@ class PostItApiService {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 Log.d(TAG, "WS Received: $text")
                 try {
+                    val root = gson.fromJson(text, JsonObject::class.java)
                     val msg = gson.fromJson(text, WsMessage::class.java)
-                    when (msg.type) {
-                        "suggestions" -> msg.data?.let { onSuggestionsReceived?.invoke(it) }
-                        "speech" -> msg.text?.let { onSpeechRequested?.invoke(it) }
-                        "connected" -> Log.d(TAG, "WS Handshake: ${msg.text}")
-                        "error" -> Log.e(TAG, "WS Error: ${msg.text}")
+                    val type = root.get("type")?.asString ?: root.get("event")?.asString ?: msg.type
+                    when (type) {
+                        "suggestions" -> {
+                            val suggestions = extractSuggestions(root.get("data")) ?: msg.data
+                            suggestions?.let { onSuggestionsReceived?.invoke(it) }
+                        }
+                        "speech" -> {
+                            val speechText = root.get("text")?.asString ?: msg.text
+                            speechText?.let { onSpeechRequested?.invoke(it) }
+                        }
+                        "connected" -> Log.d(TAG, "WS Handshake: ${msg.text ?: root.get("text")?.asString}")
+                        "error" -> Log.e(TAG, "WS Error: ${msg.text ?: root.get("text")?.asString}")
                         // Ignore "postits_received" and "graph_updated" events for Android app
                     }
                 } catch (e: Exception) {
@@ -172,5 +182,21 @@ class PostItApiService {
         // Use 80% compression for smaller size
         bitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
         return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+    }
+
+    private fun extractSuggestions(dataElement: JsonElement?): List<String>? {
+        if (dataElement == null) return null
+        return when {
+            dataElement.isJsonArray -> dataElement.asJsonArray.mapNotNull { it.asString }
+            dataElement.isJsonObject -> {
+                val inner = dataElement.asJsonObject.get("data")
+                if (inner != null && inner.isJsonArray) {
+                    inner.asJsonArray.mapNotNull { it.asString }
+                } else {
+                    null
+                }
+            }
+            else -> null
+        }
     }
 }
