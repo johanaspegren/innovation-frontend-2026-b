@@ -389,11 +389,20 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun cropDetectionRegion(bitmap: Bitmap, rect: android.graphics.RectF): Bitmap? {
-        val left = max(0, rect.left.toInt()); val top = max(0, rect.top.toInt())
-        val right = min(bitmap.width, rect.right.toInt()); val bottom = min(bitmap.height, rect.bottom.toInt())
+        val paddingRatio = 0.12f
+        val paddingX = rect.width() * paddingRatio
+        val paddingY = rect.height() * paddingRatio
+        val left = max(0, (rect.left - paddingX).toInt()); val top = max(0, (rect.top - paddingY).toInt())
+        val right = min(bitmap.width, (rect.right + paddingX).toInt()); val bottom = min(bitmap.height, (rect.bottom + paddingY).toInt())
         val width = right - left; val height = bottom - top
-        if (width <= 0 || height <= 0) return null
-        return try { Bitmap.createBitmap(bitmap, left, top, width, height) } catch (e: Exception) { null }
+        if (width <= 0 || height <= 0) {
+            Log.w(TAG, "Skipping crop with invalid size w=$width h=$height rect=$rect")
+            return null
+        }
+        return try { Bitmap.createBitmap(bitmap, left, top, width, height) } catch (e: Exception) {
+            Log.w(TAG, "Crop failed for rect=$rect size=$width x $height", e)
+            null
+        }
     }
 
     private inner class PostItAnalyzer(
@@ -525,6 +534,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                                     val previous = matchedSuggestions[trackId]
 
                                     val best = FuzzyMatcher.findBestMatch(rawOcr, suggestedContents, 0.6f)
+                                    val bestCandidate = FuzzyMatcher.findBestCandidate(rawOcr, suggestedContents)
+                                    val bestScore = best?.second ?: 0f
+                                    val candidateScore = bestCandidate?.second ?: 0f
+                                    val previousScore = if (previous != null) FuzzyMatcher.getSimilarity(rawOcr, previous) else 0f
+
+                                    Log.d(
+                                        TAG,
+                                        "OCR track=$trackId raw='$rawOcr' best='${best?.first ?: ""}' score=$bestScore candidate='${bestCandidate?.first ?: ""}' candidateScore=$candidateScore prev='${previous ?: ""}' prevScore=$previousScore suggestions=${suggestedContents.size}"
+                                    )
 
                                     when {
                                         // 1. Strong new match → override & stick

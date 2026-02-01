@@ -82,4 +82,15 @@ object FuzzyMatcher {
             .filter { it.second >= threshold }
             .maxByOrNull { it.second }
     }
+
+    fun findBestCandidate(
+        input: String,
+        suggestions: List<String>
+    ): Pair<String, Float>? {
+        if (input.isBlank()) return null
+
+        return suggestions
+            .map { it to combinedScore(input, it) }
+            .maxByOrNull { it.second }
+    }
 }
