@@ -87,6 +87,7 @@ class OverlayView @JvmOverloads constructor(
     private var detections: List<PostItDetector.Detection> = emptyList()
     private var imageWidth: Int = 0
     private var imageHeight: Int = 0
+    private var imageRotationDegrees: Int = 0
     private var scaleFactor: Float = 1f
     private var offsetX: Float = 0f
     private var offsetY: Float = 0f
@@ -100,11 +101,13 @@ class OverlayView @JvmOverloads constructor(
     fun setDetections(
         detections: List<PostItDetector.Detection>,
         imageWidth: Int,
-        imageHeight: Int
+        imageHeight: Int,
+        rotationDegrees: Int
     ) {
         this.detections = detections
         this.imageWidth = imageWidth
         this.imageHeight = imageHeight
+        this.imageRotationDegrees = rotationDegrees
         updateTransform()
         updateFocusedDetection()
         invalidate()
@@ -248,6 +251,13 @@ class OverlayView @JvmOverloads constructor(
                 rect.top
             )
 
+            val normalizedRotation = ((imageRotationDegrees % 360) + 360) % 360
+            val shouldUprightText = normalizedRotation == 90 || normalizedRotation == 270
+
+            if (shouldUprightText) {
+                canvas.save()
+                canvas.rotate(-normalizedRotation.toFloat(), bgRect.left, bgRect.top)
+            }
             // Background for readability
             canvas.drawRect(bgRect, bgPaint)
 
@@ -267,6 +277,9 @@ class OverlayView @JvmOverloads constructor(
                     bgRect.top + lineHeight * 2,
                     textPaint
                 )
+            }
+            if (shouldUprightText) {
+                canvas.restore()
             }
         }
     }

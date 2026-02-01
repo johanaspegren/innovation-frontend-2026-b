@@ -85,6 +85,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private val uploadingTrackIds = mutableSetOf<Int>()
 
     private val TAG = "InnovisionMain"
+    private val isSpeechEnabled = false
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -282,6 +283,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun speak(text: String, utteranceId: String = "innovision_tts") {
+        if (!isSpeechEnabled) return
         tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
     }
 
@@ -363,15 +365,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
                 .also {
-                    it.setAnalyzer(cameraExecutor, PostItAnalyzer { text, detections, width, height ->
+                    it.setAnalyzer(cameraExecutor, PostItAnalyzer { text, detections, width, height, rotationDegrees ->
                         runOnUiThread {
                             val currentStatus = binding.statusText.text.toString()
                             val voiceStates = listOf("Heard", "Listening...", "Recording...", "Processing...", "Voice Error", "Mic starting...", "Connected", "Offline")
                             if (!voiceStates.any { currentStatus.startsWith(it) }) {
                                 binding.statusText.text = if (text.isBlank()) "Looking for post-its..." else text
                             }
-                            binding.overlayView.setDetections(detections, width, height)
-                            processVoiceAssistant(detections)
+                        binding.overlayView.setDetections(detections, width, height, rotationDegrees)
+                        processVoiceAssistant(detections)
                         }
                     })
                 }
@@ -395,8 +397,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private inner class PostItAnalyzer(
-        private val onResult: (String, List<PostItDetector.Detection>, Int, Int) -> Unit,
-    ) : ImageAnalysis.Analyzer {
+        private val onResult: (String, List<PostItDetector.Detection>, Int, Int, Int) -> Unit,
+        ) : ImageAnalysis.Analyzer {
         private var lastQrScanTime = 0L
 
         @OptIn(ExperimentalGetImage::class) override fun analyze(imageProxy: ImageProxy) {
@@ -443,7 +445,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             // 2. Skip expensive processing if session not active and no capture requested
             if (!isSessionActive && !isCapturingForStart) {
-                onResult("", emptyList(), imageProxy.width, imageProxy.height)
+                onResult("", emptyList(), imageProxy.width, imageProxy.height, rotationDegrees)
                 imageProxy.close()
                 return
             }
@@ -484,18 +486,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             // Hold detection until session is active
             if (!isSessionActive) {
-                onResult("", emptyList(), rotatedBitmap.width, rotatedBitmap.height)
+                onResult("", emptyList(), rotatedBitmap.width, rotatedBitmap.height, rotationDegrees)
                 imageProxy.close()
                 return
             }
 
-            val detections = postItDetector.detect(bitmap, rotationDegrees)
-            val isRotated90or270 = rotationDegrees == 90 || rotationDegrees == 270
-            val displayWidth = if (isRotated90or270) bitmap.height else bitmap.width
-            val displayHeight = if (isRotated90or270) bitmap.width else bitmap.height
+            val detections = postItDetector.detect(rotatedBitmap)
+            val displayWidth = rotatedBitmap.width
+            val displayHeight = rotatedBitmap.height
 
             if (detections.isEmpty()) {
-                onResult("", detections, displayWidth, displayHeight)
+                onResult("", detections, displayWidth, displayHeight, rotationDegrees)
                 imageProxy.close()
                 return
             }
@@ -554,7 +555,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             Tasks.whenAllComplete(ocrTasks).addOnCompleteListener {
                 autoUploadNewDetections(detections, rotatedBitmap)
-                onResult(detections.filter { it.ocrText.isNotBlank() }.joinToString("\n") { it.ocrText }, detections, displayWidth, displayHeight)
+                onResult(
+                    detections.filter { it.ocrText.isNotBlank() }.joinToString("\n") { it.ocrText },
+                    detections,
+                    displayWidth,
+                    displayHeight,
+                    rotationDegrees
+                )
                 imageProxy.close()
             }
         }
