@@ -200,15 +200,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         Toast.makeText(this, "All states reset", Toast.LENGTH_SHORT).show()
     }
 
-    private fun promptJoinSession(sessionId: String) {
+    private fun promptJoinSession(sessionId: String?) {
+        val resolvedSessionId = sessionId ?: return
         if (isJoinPromptShowing || isSessionActive) return
         isJoinPromptShowing = true
-        lastJoinPromptSessionId = sessionId
+        lastJoinPromptSessionId = resolvedSessionId
         AlertDialog.Builder(this)
             .setTitle("Join session?")
-            .setMessage("Join session $sessionId on ${PostItApiService.SERVER_IP}?")
+            .setMessage("Join session $resolvedSessionId on ${PostItApiService.SERVER_IP}?")
             .setPositiveButton("Join") { _, _ ->
-                joinSession(sessionId)
+                joinSession(resolvedSessionId)
             }
             .setNegativeButton("Not now") { _, _ ->
                 isJoinPromptShowing = false
@@ -555,7 +556,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                                             }
                                         }
                                         if (shouldPrompt) {
-                                            runOnUiThread { promptJoinSession(sessionId) }
+                                            sessionId?.let { nonNullSessionId ->
+                                                runOnUiThread { promptJoinSession(nonNullSessionId) }
+                                            }
                                         }
                                     } catch (e: Exception) {
                                         Log.e(TAG, "Invalid URL in QR: $rawValue")
