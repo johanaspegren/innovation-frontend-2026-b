@@ -53,9 +53,6 @@ class PostItApiService {
     data class UploadRequest(val timestamp: Long, val session_id: String, val postits: List<PostItDto>)
     data class UploadResponse(val success: Boolean, val message: String? = null, val id: String? = null)
 
-    // WebSocket Message Format - Remains largely the same
-    data class WsMessage(val type: String, val data: List<String>? = null, val text: String? = null)
-
     fun startSession(image: Bitmap, callback: (Result<StartSessionResponse>) -> Unit) {
         val request = StartSessionRequest(System.currentTimeMillis(), bitmapToBase64(image))
         val httpRequest = Request.Builder()
