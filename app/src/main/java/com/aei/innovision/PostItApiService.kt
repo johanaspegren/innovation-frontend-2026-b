@@ -137,6 +137,7 @@ class PostItApiService {
                         "suggestions" -> {
                             val suggestions = extractSuggestions(dataElement)
                             suggestions?.let { onSuggestionsReceived?.invoke(it) }
+                            Log.d(TAG, "WS Suggestions: $suggestions")
                         }
                         "speech" -> {
                             val speechText = root.get("text")?.asString
