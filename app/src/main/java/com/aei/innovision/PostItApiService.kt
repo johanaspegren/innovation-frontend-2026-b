@@ -129,18 +129,19 @@ class PostItApiService {
                 Log.d(TAG, "WS Received: $text")
                 try {
                     val root = gson.fromJson(text, JsonObject::class.java)
-                    val type = root.get("type")?.asString ?: root.get("event")?.asString
+                    val msg = gson.fromJson(text, WsMessage::class.java)
+                    val type = root.get("type")?.asString ?: root.get("event")?.asString ?: msg.type
                     when (type) {
                         "suggestions" -> {
-                            val suggestions = extractSuggestions(root.get("data"))
+                            val suggestions = extractSuggestions(root.get("data")) ?: msg.data
                             suggestions?.let { onSuggestionsReceived?.invoke(it) }
                         }
                         "speech" -> {
-                            val speechText = extractText(root)
+                            val speechText = root.get("text")?.asString ?: msg.text
                             speechText?.let { onSpeechRequested?.invoke(it) }
                         }
-                        "connected" -> Log.d(TAG, "WS Handshake: ${extractText(root)}")
-                        "error" -> Log.e(TAG, "WS Error: ${extractText(root)}")
+                        "connected" -> Log.d(TAG, "WS Handshake: ${msg.text ?: root.get("text")?.asString}")
+                        "error" -> Log.e(TAG, "WS Error: ${msg.text ?: root.get("text")?.asString}")
                         // Ignore "postits_received" and "graph_updated" events for Android app
                     }
                 } catch (e: Exception) {
@@ -194,22 +195,5 @@ class PostItApiService {
             }
             else -> null
         }
-    }
-
-    private fun extractText(root: JsonObject): String? {
-        val direct = root.get("text")?.takeIf { it.isJsonPrimitive }?.asString
-        if (!direct.isNullOrBlank()) {
-            return direct
-        }
-        val message = root.get("message")?.takeIf { it.isJsonPrimitive }?.asString
-        if (!message.isNullOrBlank()) {
-            return message
-        }
-        val dataText = root.get("data")?.takeIf { it.isJsonObject }
-            ?.asJsonObject
-            ?.get("text")
-            ?.takeIf { it.isJsonPrimitive }
-            ?.asString
-        return dataText
     }
 }
