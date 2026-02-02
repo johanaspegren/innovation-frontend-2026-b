@@ -24,7 +24,8 @@ class PostItApiService {
         var SERVER_PORT = 8080
 
         val postItsUrl: String get() = "http://$SERVER_IP:$SERVER_PORT/api/postits"
-        val startSessionUrl: String get() = "http://$SERVER_IP:$SERVER_PORT/api/sessions/start"
+        fun joinSessionUrl(sessionId: String) = "http://$SERVER_IP:$SERVER_PORT/api/sessions/$sessionId/join"
+        fun sceneUploadUrl(sessionId: String) = "http://$SERVER_IP:$SERVER_PORT/api/sessions/$sessionId/scene"
         // WebSocket URL will be constructed with the session ID dynamically
         fun wsUrl(sessionId: String) = "ws://$SERVER_IP:$SERVER_PORT/ws/$sessionId"
     }
@@ -47,11 +48,17 @@ class PostItApiService {
     data class PostItDto(val trackId: Int?, val text: String, val confidence: Float, val bounds: BoundsDto)
 
     // New request/response DTOs based on SPEC.md
-    data class StartSessionRequest(val timestamp: Long, val imageBase64: String)
-    data class StartSessionResponse(val success: Boolean, val session_id: String? = null, val message: String? = null)
+    data class SceneUploadRequest(val timestamp: Long, val imageBase64: String)
+    data class JoinSessionResponse(
+        val success: Boolean,
+        val session_id: String? = null,
+        val suggestions: List<String>? = null,
+        val message: String? = null
+    )
     
     data class UploadRequest(val timestamp: Long, val session_id: String, val postits: List<PostItDto>)
     data class UploadResponse(val success: Boolean, val message: String? = null, val id: String? = null)
+    data class SceneUploadResponse(val success: Boolean, val session_id: String? = null, val message: String? = null)
     
     data class WsMessage(
         val type: String,
@@ -59,11 +66,10 @@ class PostItApiService {
         val data: List<String>? = null
     )
 
-    fun startSession(image: Bitmap, callback: (Result<StartSessionResponse>) -> Unit) {
-        val request = StartSessionRequest(System.currentTimeMillis(), bitmapToBase64(image))
+    fun joinSession(sessionId: String, callback: (Result<JoinSessionResponse>) -> Unit) {
         val httpRequest = Request.Builder()
-            .url(startSessionUrl)
-            .post(gson.toJson(request).toRequestBody("application/json".toMediaType()))
+            .url(joinSessionUrl(sessionId))
+            .post("".toRequestBody("application/json".toMediaType()))
             .build()
 
         client.newCall(httpRequest).enqueue(object : Callback {
@@ -72,12 +78,38 @@ class PostItApiService {
                 response.use {
                     if (response.isSuccessful) {
                         val body = response.body?.string()
-                        val result = gson.fromJson(body, StartSessionResponse::class.java)
-                        // Store session ID upon successful start
+                        val result = gson.fromJson(body, JoinSessionResponse::class.java)
                         activeSessionId = result.session_id
                         callback(Result.success(result))
                     } else {
-                        callback(Result.failure(IOException("Start session failed: Code ${response.code}")))
+                        callback(Result.failure(IOException("Join session failed: Code ${response.code}")))
+                    }
+                }
+            }
+        })
+    }
+
+    fun uploadSceneImage(image: Bitmap, callback: (Result<SceneUploadResponse>) -> Unit) {
+        val sessionId = activeSessionId
+        if (sessionId == null) {
+            callback(Result.failure(IllegalStateException("Cannot upload scene image. Session ID is missing.")))
+            return
+        }
+
+        val request = SceneUploadRequest(System.currentTimeMillis(), bitmapToBase64(image))
+        val httpRequest = Request.Builder()
+            .url(sceneUploadUrl(sessionId))
+            .post(gson.toJson(request).toRequestBody("application/json".toMediaType()))
+            .build()
+
+        client.newCall(httpRequest).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) { callback(Result.failure(e)) }
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    if (response.isSuccessful) {
+                        callback(Result.success(gson.fromJson(response.body?.string(), SceneUploadResponse::class.java)))
+                    } else {
+                        callback(Result.failure(IOException("Scene upload failed: Code ${response.code}")))
                     }
                 }
             }
