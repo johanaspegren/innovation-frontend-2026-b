@@ -15,6 +15,7 @@ import android.util.Log
 import android.view.KeyEvent
 import android.view.View
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
@@ -34,6 +35,7 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import java.net.URI
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -67,9 +69,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     // Session state
     private var isSessionActive = false
-    private var isCapturingForStart = false
     private var isServerFound = false
     private var hasReceivedSuggestions = false
+    private var activeSessionId: String? = null
+    private var isCapturingSceneImage = false
+    private var isSceneUploadRequested = false
+    private var lastJoinPromptSessionId: String? = null
+    private var isJoinPromptShowing = false
 
     // Suggestions from backend (initialized with defaults)
     @Volatile
@@ -121,19 +127,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             resetAll()
         }
 
-        binding.startButton.setOnClickListener {
-            startSessionWithImage()
-        }
-
         initWebSocket()
         checkPermissions()
-    }
-
-    private fun startSessionWithImage() {
-        isCapturingForStart = true
-        binding.startButton.isEnabled = false
-        binding.startButton.text = "CAPTURING..."
-        Toast.makeText(this, "Capturing whiteboard...", Toast.LENGTH_SHORT).show()
     }
 
     private fun initWebSocket() {
@@ -143,7 +138,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     if (connected) android.R.drawable.presence_online 
                     else android.R.drawable.presence_offline
                 )
-                binding.statusText.text = if (connected) "Connected to Backend" else "Backend Offline"
+                binding.statusText.text = when {
+                    isSessionActive && !activeSessionId.isNullOrBlank() ->
+                        if (connected) "Session: $activeSessionId" else "Session offline"
+                    connected -> "Connected to Backend"
+                    else -> "Backend Offline"
+                }
             }
         }
 
@@ -155,6 +155,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     hasReceivedSuggestions = true
                     Toast.makeText(this, "Suggestions updated from backend", Toast.LENGTH_SHORT).show()
                 }
+                binding.suggestionsStatusIcon.visibility = View.VISIBLE
                 Log.d(TAG, "Updated suggestions: $newSuggestions")
             }
         }
@@ -188,11 +189,101 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         lastAskedTrackId = null
         isSessionActive = false
         isServerFound = false
-        binding.startButton.visibility = View.VISIBLE
-        binding.startButton.isEnabled = true
-        binding.startButton.text = "START SESSION"
+        hasReceivedSuggestions = false
+        activeSessionId = null
+        isCapturingSceneImage = false
+        isSceneUploadRequested = false
+        lastJoinPromptSessionId = null
+        isJoinPromptShowing = false
+        binding.suggestionsStatusIcon.visibility = View.GONE
         apiService.stopWebSocket()
         Toast.makeText(this, "All states reset", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun promptJoinSession(sessionId: String) {
+        if (isJoinPromptShowing || isSessionActive) return
+        isJoinPromptShowing = true
+        lastJoinPromptSessionId = sessionId
+        AlertDialog.Builder(this)
+            .setTitle("Join session?")
+            .setMessage("Join session $sessionId on ${PostItApiService.SERVER_IP}?")
+            .setPositiveButton("Join") { _, _ ->
+                joinSession(sessionId)
+            }
+            .setNegativeButton("Not now") { _, _ ->
+                isJoinPromptShowing = false
+            }
+            .setOnCancelListener { isJoinPromptShowing = false }
+            .show()
+    }
+
+    private fun joinSession(sessionId: String) {
+        apiService.joinSession(sessionId) { result ->
+            runOnUiThread {
+                isJoinPromptShowing = false
+                result.fold(
+                    onSuccess = { response ->
+                        if (response.success) {
+                            val resolvedSessionId = response.session_id ?: sessionId
+                            isSessionActive = true
+                            activeSessionId = resolvedSessionId
+                            apiService.startWebSocket(resolvedSessionId)
+                            response.suggestions?.let { suggestions ->
+                                if (suggestions.isNotEmpty()) {
+                                    suggestedContents = suggestions.toList()
+                                    matchedSuggestions.clear()
+                                    hasReceivedSuggestions = true
+                                    binding.suggestionsStatusIcon.visibility = View.VISIBLE
+                                }
+                            }
+                            binding.statusText.text = "Session: $resolvedSessionId"
+                            Toast.makeText(this, "Joined session", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(this, "Join failed: ${response.message ?: "Server reported failure"}", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onFailure = {
+                        Toast.makeText(this, "Join failed, check server", Toast.LENGTH_SHORT).show()
+                    }
+                )
+            }
+        }
+    }
+
+    private fun extractSessionIdFromUrl(rawValue: String): String? {
+        return try {
+            val uri = URI(rawValue)
+            val query = uri.query.orEmpty()
+            val queryParams = query.split("&")
+                .filter { it.contains("=") }
+                .associate {
+                    val parts = it.split("=")
+                    parts[0] to parts.getOrElse(1) { "" }
+                }
+            val sessionFromQuery = queryParams["session_id"] ?: queryParams["sessionId"]
+            if (!sessionFromQuery.isNullOrBlank() && looksLikeSessionId(sessionFromQuery)) {
+                return sessionFromQuery
+            }
+            val pathSegments = uri.path?.trim('/')?.split('/')?.filter { it.isNotBlank() }.orEmpty()
+            val sessionIndex = pathSegments.indexOf("sessions")
+            val fromSessions = if (sessionIndex != -1) pathSegments.getOrNull(sessionIndex + 1) else null
+            if (!fromSessions.isNullOrBlank() && looksLikeSessionId(fromSessions)) {
+                return fromSessions
+            }
+            val lastSegment = pathSegments.lastOrNull()
+            if (!lastSegment.isNullOrBlank() && looksLikeSessionId(lastSegment)) {
+                return lastSegment
+            }
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse session ID from QR: $rawValue", e)
+            null
+        }
+    }
+
+    private fun looksLikeSessionId(value: String): Boolean {
+        val uuidRegex = Regex("^[0-9a-fA-F-]{32,36}$")
+        return uuidRegex.matches(value)
     }
 
     override fun onInit(status: Int) {
@@ -312,6 +403,20 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun requestSceneUpload() {
+        if (!isSessionActive) {
+            Toast.makeText(this, "Join a session first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (isSceneUploadRequested) {
+            Toast.makeText(this, "Scene upload already requested", Toast.LENGTH_SHORT).show()
+            return
+        }
+        isSceneUploadRequested = true
+        isCapturingSceneImage = true
+        Toast.makeText(this, "Capturing scene image...", Toast.LENGTH_SHORT).show()
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
             val focused = binding.overlayView.getFocusedDetection()
@@ -319,6 +424,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 toggleLock(focused)
                 return true
             }
+        }
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            requestSceneUpload()
+            return true
         }
         return super.onKeyDown(keyCode, event)
     }
@@ -419,8 +528,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val mediaImage = imageProxy.image ?: run { imageProxy.close(); return }
             val rotationDegrees = imageProxy.imageInfo.rotationDegrees
             
-            // 1. QR Scanning - Only if server not yet found
-            if (!isServerFound) {
+            // 1. QR Scanning - until session joins
+            if (!isSessionActive) {
                 val now = System.currentTimeMillis()
                 if (now - lastQrScanTime > 1000) { // Scan once per second
                     lastQrScanTime = now
@@ -436,10 +545,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                                         val url = java.net.URL(rawValue)
                                         PostItApiService.SERVER_IP = url.host
                                         PostItApiService.SERVER_PORT = if (url.port != -1) url.port else 80
-                                        isServerFound = true
-                                        runOnUiThread {
-                                            Toast.makeText(this@MainActivity, "Server Connected: ${PostItApiService.SERVER_IP}", Toast.LENGTH_LONG).show()
-                                            binding.statusText.text = "Server: ${PostItApiService.SERVER_IP}"
+                                        val sessionId = extractSessionIdFromUrl(rawValue)
+                                        val shouldPrompt = sessionId != null && sessionId != lastJoinPromptSessionId
+                                        if (!isServerFound) {
+                                            isServerFound = true
+                                            runOnUiThread {
+                                                Toast.makeText(this@MainActivity, "Server Connected: ${PostItApiService.SERVER_IP}", Toast.LENGTH_LONG).show()
+                                                binding.statusText.text = "Server: ${PostItApiService.SERVER_IP}"
+                                            }
+                                        }
+                                        if (shouldPrompt) {
+                                            runOnUiThread { promptJoinSession(sessionId) }
                                         }
                                     } catch (e: Exception) {
                                         Log.e(TAG, "Invalid URL in QR: $rawValue")
@@ -457,8 +573,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
             }
 
-            // 2. Skip expensive processing if session not active and no capture requested
-            if (!isSessionActive && !isCapturingForStart) {
+            // 2. Skip expensive processing if session not active
+            if (!isSessionActive) {
                 onResult("", emptyList(), imageProxy.width, imageProxy.height, rotationDegrees)
                 imageProxy.close()
                 return
@@ -468,30 +584,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val bitmap = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
             yuvToRgbConverter.yuvToRgb(mediaImage, bitmap)
             val rotatedBitmap = rotateBitmap(bitmap, rotationDegrees)
-            
-            // Capture for start session
-            if (isCapturingForStart) {
-                isCapturingForStart = false
-                apiService.startSession(rotatedBitmap) { result ->
+
+            if (isCapturingSceneImage && isSceneUploadRequested) {
+                isCapturingSceneImage = false
+                isSceneUploadRequested = false
+                apiService.uploadSceneImage(rotatedBitmap) { result ->
                     runOnUiThread {
                         result.fold(
-                            onSuccess = { response ->
-                                if (response.success && response.session_id != null) {
-                                    val sessionId = response.session_id
-                                    Toast.makeText(this@MainActivity, "Session Started! ID: $sessionId", Toast.LENGTH_LONG).show()
-                                    binding.startButton.visibility = View.GONE
-                                    isSessionActive = true
-                                    apiService.startWebSocket(sessionId)
-                                } else {
-                                    binding.startButton.isEnabled = true
-                                    binding.startButton.text = "START SESSION"
-                                    Toast.makeText(this@MainActivity, "Session failed: ${response.message ?: "Server reported failure"}", Toast.LENGTH_SHORT).show()
-                                }
+                            onSuccess = {
+                                Toast.makeText(this@MainActivity, "Scene image uploaded", Toast.LENGTH_SHORT).show()
                             },
-                            onFailure = { 
-                                binding.startButton.isEnabled = true
-                                binding.startButton.text = "START SESSION"
-                                Toast.makeText(this@MainActivity, "Capture failed, try again", Toast.LENGTH_SHORT).show()
+                            onFailure = {
+                                Toast.makeText(this@MainActivity, "Scene upload failed", Toast.LENGTH_SHORT).show()
                             }
                         )
                     }
