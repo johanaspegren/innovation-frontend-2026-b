@@ -127,6 +127,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             resetAll()
         }
 
+        updateSuggestionsIndicator()
         initWebSocket()
         checkPermissions()
     }
@@ -155,7 +156,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     hasReceivedSuggestions = true
                     Toast.makeText(this, "Suggestions updated from backend", Toast.LENGTH_SHORT).show()
                 }
-                binding.suggestionsStatusIcon.visibility = View.VISIBLE
+                updateSuggestionsIndicator()
                 Log.d(TAG, "Updated suggestions: $newSuggestions")
             }
         }
@@ -195,7 +196,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         isSceneUploadRequested = false
         lastJoinPromptSessionId = null
         isJoinPromptShowing = false
-        binding.suggestionsStatusIcon.visibility = View.GONE
+        updateSuggestionsIndicator()
         apiService.stopWebSocket()
         Toast.makeText(this, "All states reset", Toast.LENGTH_SHORT).show()
     }
@@ -230,12 +231,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                             activeSessionId = resolvedSessionId
                             apiService.startWebSocket(resolvedSessionId)
                             response.suggestions?.let { suggestions ->
-                                if (suggestions.isNotEmpty()) {
-                                    suggestedContents = suggestions.toList()
-                                    matchedSuggestions.clear()
-                                    hasReceivedSuggestions = true
-                                    binding.suggestionsStatusIcon.visibility = View.VISIBLE
-                                }
+                                suggestedContents = suggestions.toList()
+                                matchedSuggestions.clear()
+                                hasReceivedSuggestions = true
+                                updateSuggestionsIndicator()
                             }
                             binding.statusText.text = "Session: $resolvedSessionId"
                             Toast.makeText(this, "Joined session", Toast.LENGTH_SHORT).show()
@@ -249,6 +248,24 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 )
             }
         }
+    }
+
+    private fun updateSuggestionsIndicator() {
+        val suggestionsCount = if (hasReceivedSuggestions) suggestedContents.size else 0
+        val hasSuggestions = suggestionsCount > 0
+        val tintColor = ContextCompat.getColor(
+            this,
+            if (hasSuggestions) android.R.color.holo_blue_light else android.R.color.darker_gray
+        )
+        val description = if (hasSuggestions) {
+            "Suggestions available: $suggestionsCount"
+        } else {
+            "No suggestions available"
+        }
+
+        binding.suggestionsStatusIcon.setColorFilter(tintColor)
+        binding.suggestionsStatusIcon.contentDescription = description
+        binding.suggestionsCountText.text = suggestionsCount.toString()
     }
 
     private fun extractSessionIdFromUrl(rawValue: String): String? {
