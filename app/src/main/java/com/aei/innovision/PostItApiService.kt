@@ -129,19 +129,22 @@ class PostItApiService {
                 Log.d(TAG, "WS Received: $text")
                 try {
                     val root = gson.fromJson(text, JsonObject::class.java)
-                    val msg = gson.fromJson(text, WsMessage::class.java)
-                    val type = root.get("type")?.asString ?: root.get("event")?.asString ?: msg.type
+                    val dataElement = root.get("data")
+                    val type = root.get("type")?.asString
+                        ?: root.get("event")?.asString
+                        ?: dataElement?.asJsonObject?.get("type")?.asString
                     when (type) {
                         "suggestions" -> {
-                            val suggestions = extractSuggestions(root.get("data")) ?: msg.data
+                            val suggestions = extractSuggestions(dataElement)
                             suggestions?.let { onSuggestionsReceived?.invoke(it) }
                         }
                         "speech" -> {
-                            val speechText = root.get("text")?.asString ?: msg.text
+                            val speechText = root.get("text")?.asString
+                                ?: extractSpeechText(dataElement)
                             speechText?.let { onSpeechRequested?.invoke(it) }
                         }
-                        "connected" -> Log.d(TAG, "WS Handshake: ${msg.text ?: root.get("text")?.asString}")
-                        "error" -> Log.e(TAG, "WS Error: ${msg.text ?: root.get("text")?.asString}")
+                        "connected" -> Log.d(TAG, "WS Handshake: ${extractMessageText(root, dataElement)}")
+                        "error" -> Log.e(TAG, "WS Error: ${extractMessageText(root, dataElement)}")
                         // Ignore "postits_received" and "graph_updated" events for Android app
                     }
                 } catch (e: Exception) {
@@ -195,5 +198,20 @@ class PostItApiService {
             }
             else -> null
         }
+    }
+
+    private fun extractSpeechText(dataElement: JsonElement?): String? {
+        if (dataElement == null) return null
+        return when {
+            dataElement.isJsonPrimitive -> dataElement.asString
+            dataElement.isJsonObject -> dataElement.asJsonObject.get("text")?.asString
+            else -> null
+        }
+    }
+
+    private fun extractMessageText(root: JsonObject, dataElement: JsonElement?): String? {
+        return root.get("message")?.asString
+            ?: root.get("text")?.asString
+            ?: extractSpeechText(dataElement)
     }
 }
