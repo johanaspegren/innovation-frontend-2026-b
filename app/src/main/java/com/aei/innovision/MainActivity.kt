@@ -43,6 +43,7 @@ import kotlin.math.min
 
 private const val STRONG_MATCH = 0.78f
 private const val STICKY_FLOOR = 0.40f
+private const val CANDIDATE_FLOOR = 0.25f
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var binding: ActivityMainBinding
@@ -563,7 +564,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                                             detection.ocrText = previous
                                         }
 
-                                        // 3. Otherwise show raw OCR
+                                        // 3. Use best candidate when it clears the floor and beats prior similarity
+                                        bestCandidate != null &&
+                                            candidateScore >= CANDIDATE_FLOOR &&
+                                            candidateScore >= previousScore -> {
+                                            detection.ocrText = bestCandidate.first
+                                            matchedSuggestions[trackId] = bestCandidate.first
+                                        }
+
+                                        // 4. Otherwise show raw OCR
                                         else -> {
                                             detection.ocrText = rawOcr
                                             matchedSuggestions.remove(trackId)
