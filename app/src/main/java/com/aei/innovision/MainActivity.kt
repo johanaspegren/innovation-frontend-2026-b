@@ -253,19 +253,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun updateSuggestionsIndicator() {
         val suggestionsCount = if (hasReceivedSuggestions) suggestedContents.size else 0
         val hasSuggestions = suggestionsCount > 0
-        val tintColor = ContextCompat.getColor(
-            this,
-            if (hasSuggestions) android.R.color.holo_blue_light else android.R.color.darker_gray
-        )
-        val description = if (hasSuggestions) {
+
+        binding.suggestionsCountText.text = suggestionsCount.toString()
+        binding.suggestionsCountText.visibility = if (hasReceivedSuggestions) View.VISIBLE else View.GONE
+
+        binding.suggestionsCountText.contentDescription = if (hasSuggestions) {
             "Suggestions available: $suggestionsCount"
         } else {
             "No suggestions available"
         }
-
-        binding.suggestionsStatusIcon.setColorFilter(tintColor)
-        binding.suggestionsStatusIcon.contentDescription = description
-        binding.suggestionsCountText.text = suggestionsCount.toString()
     }
 
     private fun extractSessionIdFromUrl(rawValue: String): String? {
@@ -712,7 +708,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             Tasks.whenAllComplete(ocrTasks).addOnCompleteListener {
                 autoUploadNewDetections(detections, rotatedBitmap)
                 onResult(
-                    detections.filter { it.ocrText.isNotBlank() }.joinToString("\n") { it.ocrText },
+                    detections.filter { it.ocrText.isNotBlank() }.joinToString("\n") { it.ocrText!! },
                     detections,
                     displayWidth,
                     displayHeight,
