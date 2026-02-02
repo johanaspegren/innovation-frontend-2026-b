@@ -74,6 +74,7 @@ class PostItDetector(context: Context) {
     private val maxTracks = 20                 // sanity cap
     private val alpha = 0.65f                  // EMA weight for new box (higher = snappier, lower = smoother)
     private val boxPaddingRatio = 0.08f        // expand boxes slightly to better cover post-its
+    private val boxTopPaddingRatio = 0.12f     // extra headroom for text near the top edge
 
     init {
         val model: MappedByteBuffer = FileUtil.loadMappedFile(context, "best_float16.tflite")
@@ -202,14 +203,15 @@ class PostItDetector(context: Context) {
 
             // Expand box slightly to better cover post-its
             val paddingX = boxW * boxPaddingRatio
-            val paddingY = boxH * boxPaddingRatio
+            val paddingTop = boxH * (boxPaddingRatio + boxTopPaddingRatio)
+            val paddingBottom = boxH * boxPaddingRatio
 
             // Clamp to rotated bitmap bounds
             val clamped = RectF(
                 (left - paddingX).coerceIn(0f, rotatedBitmap.width.toFloat()),
-                (top - paddingY).coerceIn(0f, rotatedBitmap.height.toFloat()),
+                (top - paddingTop).coerceIn(0f, rotatedBitmap.height.toFloat()),
                 (right + paddingX).coerceIn(0f, rotatedBitmap.width.toFloat()),
-                (bottom + paddingY).coerceIn(0f, rotatedBitmap.height.toFloat())
+                (bottom + paddingBottom).coerceIn(0f, rotatedBitmap.height.toFloat())
             )
 
             detections.add(

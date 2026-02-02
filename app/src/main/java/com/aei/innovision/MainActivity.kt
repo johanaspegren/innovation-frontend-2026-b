@@ -396,11 +396,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun cropDetectionRegion(bitmap: Bitmap, rect: android.graphics.RectF): Bitmap? {
-        val paddingRatio = 0.12f
-        val paddingX = rect.width() * paddingRatio
-        val paddingY = rect.height() * paddingRatio
-        val left = max(0, (rect.left - paddingX).toInt()); val top = max(0, (rect.top - paddingY).toInt())
-        val right = min(bitmap.width, (rect.right + paddingX).toInt()); val bottom = min(bitmap.height, (rect.bottom + paddingY).toInt())
+        val left = max(0, rect.left.toInt()); val top = max(0, rect.top.toInt())
+        val right = min(bitmap.width, rect.right.toInt()); val bottom = min(bitmap.height, rect.bottom.toInt())
+
         val width = right - left; val height = bottom - top
         if (width <= 0 || height <= 0) {
             Log.w(TAG, "Skipping crop with invalid size w=$width h=$height rect=$rect")
